@@ -1,0 +1,10 @@
+[submodule "thirdparty/gmr"]
+	path = thirdparty/gmr
+	url = git@bitbucket.org:robrosinc/gmr.git
+	branch = feat/vr-uplink-convention
+[submodule "thirdparty/vr_link_schema"]
+	path = thirdparty/vr_link_schema
+	url = git@bitbucket.org:robrosinc/vr_link_schema.git
+[submodule "thirdparty/igris_c_sdk"]
+	path = thirdparty/igris_c_sdk
+	url = git@bitbucket.org:robrosinc/igris_c_sdk.git
