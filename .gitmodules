@@ -1,7 +1,7 @@
 [submodule "thirdparty/gmr"]
 	path = thirdparty/gmr
 	url = git@bitbucket.org:robrosinc/gmr.git
-	branch = feat/vr-uplink-convention
+	branch = origin/main
 [submodule "thirdparty/vr_link_schema"]
 	path = thirdparty/vr_link_schema
 	url = git@bitbucket.org:robrosinc/vr_link_schema.git
