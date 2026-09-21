@@ -48,3 +48,8 @@ Thumbs.db
 *.mov
 *.wmv
 
+CLAUDE.md
+
+# pixi environment and editable-install metadata
+.pixi/
+*.egg-info/

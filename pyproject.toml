@@ -1,0 +1,98 @@
+# igris_c_gmr: VRS1 headset -> GMR -> ROS 2 motion reference + igris_c_sdk DDS producer.
+#
+# The environment is managed by pixi (https://pixi.sh). One Python 3.12 process needs
+# GMR (mujoco/mink), rclpy and the igris_c_sdk pybind wheel at the same time:
+#   * RoboStack (robostack-jazzy) provides ROS 2 Jazzy as conda packages, so rclpy lives
+#     inside .pixi/envs and nothing is taken from a host /opt/ros install. Channel order
+#     and version bounds mirror the `core` feature of ~/workspace/repos/igris_c
+#     (pyproject.toml), which is the env the robot NUC runs;
+#   * this repo (source/igris_c_gmr) and thirdparty/vr_link_schema are installed editable
+#     from their own pyproject.toml, so no PYTHONPATH entry is needed for them;
+#   * thirdparty/gmr is used straight from the submodule via PYTHONPATH
+#     (scripts/activate_ros.sh): its setup.py pulls smplx/opencv/redis the producer does not need;
+#   * the igris_c_sdk wheel is built by a human (`task wheel` in thirdparty/igris_c_sdk) and
+#     installed with `pixi run install-sdk`.
+#
+#   pixi install && pixi run install-sdk
+#   pixi run test
+#   pixi run teleop -- --dds_namespace igris_c_<unit>
+
+[project]
+name = "igris_c_gmr"
+version = "0.1.0"
+description = "VRS1 headset teleoperation producer for the IGRIS-C whole-body policy runtime"
+requires-python = "==3.12.*"
+readme = "README.md"
+# Runtime deps are supplied by pixi (conda + pypi sections below), not by this list:
+# rclpy/torch/etc. must not be re-resolved from PyPI when the package is installed editable.
+dependencies = []
+
+[project.scripts]
+igris-c-gmr = "igris_c_gmr.producer:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["source"]
+
+[tool.pixi.workspace]
+# RoboStack first (list order = priority) so shared packages (python, libstdcxx, ...)
+# resolve from the RoboStack-aligned set, as in igris_c's `core` feature.
+channels = ["https://prefix.dev/robostack-jazzy", "conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+pip = "*"
+numpy = ">=2.0"
+scipy = ">=1.13"
+# general_motion_retargeting imports torch at package import.
+pytorch-cpu = ">=2.4"
+pytest = ">=8"
+# --- ROS 2 Jazzy (RoboStack). Bounds copied from igris_c pyproject.toml [tool.pixi.feature.core.dependencies]
+# so both envs resolve inside the same Jazzy release line. rmw_fastrtps_cpp is the Jazzy default and
+# what igris_c ships; the inference node it talks to runs the same RMW.
+ros-jazzy-rclpy = ">=7.1.9,<8"
+ros-jazzy-std-msgs = ">=5.3.6,<6"
+ros-jazzy-rmw-fastrtps-cpp = ">=8.4.3,<9"
+
+[tool.pixi.pypi-dependencies]
+# This repo and the VRS1 receiver, installed editable (source/ and thirdparty/vr_link_schema
+# stay the import roots; edits are live).
+igris_c_gmr = { path = ".", editable = true }
+vr-link-schema = { path = "thirdparty/vr_link_schema", editable = true }
+# Versions are the ones the producer was exercised with in igris_c_teleop_env (2026-09).
+mujoco = ">=3.3"
+mink = ">=1.3"
+daqp = ">=0.9"
+qpsolvers = ">=4.5"
+loop-rate-limiters = ">=1.2"
+rich = "*"
+joblib = "*"
+# general_motion_retargeting/__init__ imports robot_motion_viewer -> imageio (viewer unused by the producer).
+imageio = ">=2.34"
+# vr_link_schema/python (vr_link) decodes VRS1 FlatBuffers; must match the pinned flatc.
+flatbuffers = ">=24,<26"
+
+[tool.pixi.activation]
+scripts = ["scripts/activate_ros.sh"]
+
+[tool.pixi.tasks]
+install-sdk = { cmd = "bash scripts/install_sdk_wheel.sh", description = "Install the igris_c_sdk wheel from thirdparty/igris_c_sdk/dist (build it first with `task wheel` there)" }
+teleop = { cmd = "igris-c-gmr", description = "Run the producer (append -- --dds_namespace <ns> ...)" }
+replay = { cmd = "igris-c-gmr --no_dds --replay_vrs1", description = "Headset-free ROS-only replay (append -- <file>.vrs1)" }
+# launch_testing's pytest plugin (if present in the env) autoloads and breaks collection.
+test = { cmd = "pytest tests -m 'not ros' -q", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1" } }
+test-ros = { cmd = "pytest tests -m ros -q", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1", ROS_LOCALHOST_ONLY = "1" } }
+check-env = { cmd = "python -c \"import rclpy, igris_c_sdk, mujoco, mink, vr_link, general_motion_retargeting, igris_c_gmr; print('igris_c_sdk:', igris_c_sdk.__file__); print('rclpy:', rclpy.__file__); print('ChannelFactory' in dir(igris_c_sdk) or 'SHADOWED by rosidl package')\"" }
+
+[tool.pytest.ini_options]
+pythonpath = ["source", "tests"]
+testpaths = ["tests"]
+markers = ["ros: needs a working rclpy (real ROS 2 round trip)"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
