@@ -10,6 +10,8 @@ Pipeline::
                                                                     -> igris_c_inference_node (ONNX WBC -> DDS lowcmd)
       -> HandTargets -> HandCmdDdsPublisher                         <ns>/handcmd (DDS HandCmd, fingers bypass the policy)
       -> ControllerEvents -> ControlModeClient                      <ns>/service/control_mode/request (DDS service)
+      -> RefStateDdsPublisher (opt-in, --ref_dds_topic)             <ns>/gmr/refstate (DDS MasterArmState: the 31
+                                                                    retargeted joints, headset hand-overlay display only)
 
 Run order on the robot NUC (one terminal each):
   1. igris_c controller / bridge (DDS lowstate, lowcmd, handcmd, control-mode service) - human-operated.
@@ -42,10 +44,18 @@ from pathlib import Path
 import numpy as np
 
 from .controller import ControllerEvents
-from .dds_io import DEFAULT_HAND_TOPIC, TOPIC_NAMINGS, ControlModeClient, DdsChannel, HandCmdDdsPublisher
+from .dds_io import (
+    DEFAULT_HAND_TOPIC,
+    DEFAULT_REF_TOPIC,
+    TOPIC_NAMINGS,
+    ControlModeClient,
+    DdsChannel,
+    HandCmdDdsPublisher,
+    RefStateDdsPublisher,
+)
 from .hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
 from .neck import NeckOverride, head_relative_neck_angles
-from .retarget_frame import RetargetFramePayloadBuilder, to_ros_payload
+from .retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, to_ros_payload
 from .ros_publisher import DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
 from .vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
 
@@ -98,6 +108,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     dds.add_argument("--hand_dds_topic", type=str, default=DEFAULT_HAND_TOPIC, help="Bare HandCmd topic (resolved under the namespace).")
     dds.add_argument("--control_mode_timeout_ms", type=int, default=3000, help="Service timeout per control-mode request.")
     dds.add_argument("--no_mode_events", action="store_true", help="Ignore controller buttons (no control-mode requests).")
+    dds.add_argument(
+        "--ref_dds_topic",
+        type=str,
+        default=DEFAULT_REF_TOPIC,
+        metavar="TOPIC",
+        help=f"Also publish the 31 retargeted joints as MasterArmState on this bare topic (headset hand-overlay display "
+        f"input, e.g. {DEFAULT_REF_TOPIC}). Off unless given; the robot bridge does not read it.",
+    )
 
     parser.add_argument("--measure_fps", action="store_true", help="Print solve rate, IK time and output counters every 2 s.")
     parser.add_argument("--log_level", type=str, default="INFO")
@@ -149,10 +167,11 @@ def main(argv: list[str] | None = None) -> int:
         hands.source,
     )
 
-    # Init order: DDS channel -> service client (before any other reader) -> hand publisher -> ROS.
+    # Init order: DDS channel -> service client (before any other reader) -> hand publisher -> ref publisher -> ROS.
     channel: DdsChannel | None = None
     control: ControlModeClient | None = None
     hand_dds: HandCmdDdsPublisher | None = None
+    ref_dds: RefStateDdsPublisher | None = None
     ros: RetargetFrameRosPublisher | None = None
     device = None
     stop = False
@@ -183,8 +202,15 @@ def main(argv: list[str] | None = None) -> int:
                 if control is not None
                 else "; control-mode requests disabled (--no_mode_events)",
             )
+            if args.ref_dds_topic:
+                ref_dds = RefStateDdsPublisher(channel, args.ref_dds_topic)
+                logger.info(
+                    "RefState (31 retargeted joints, MasterArmState type, display only) on %s at %.0f Hz",
+                    ref_dds.resolved_topic,
+                    args.target_fps,
+                )
         else:
-            logger.info("DDS disabled (--no_dds): ROS frame only; hand command and controller buttons are not sent.")
+            logger.info("DDS disabled (--no_dds): ROS frame only; hand command, controller buttons and RefState are not sent.")
 
         ros = RetargetFrameRosPublisher(domain_id=args.ros_domain_id, topic=args.ros_topic, node_name=args.ros_node_name)
         logger.info("ROS 2 publisher %s on %s (domain %d, RELIABLE depth 1)", args.ros_node_name, args.ros_topic, args.ros_domain_id)
@@ -250,6 +276,14 @@ def main(argv: list[str] | None = None) -> int:
                     if now - last_dds_error_log > 2.0:
                         logger.warning("HandCmd DDS publish failed: %s", exc)
                         last_dds_error_log = now
+            if ref_dds is not None:
+                # After the neck override so the headset's FK sees the same neck the policy is told.
+                try:
+                    ref_dds.publish(qpos[FREE_JOINT_QPOS_SIZE:], now)
+                except Exception as exc:
+                    if now - last_dds_error_log > 2.0:
+                        logger.warning("RefState DDS publish failed: %s", exc)
+                        last_dds_error_log = now
 
             try:
                 ros.publish(to_ros_payload(builder.build(qpos, now)))
@@ -274,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
                         hands_text = f", hands L:{left_source} R:{right_source} q_right={np.round(hand_values[:6], 2).tolist()}"
                         if hand_dds is not None:
                             hands_text += f", HandCmd written {hand_dds.published} (rejected {hand_dds.rejected})"
+                    if ref_dds is not None:
+                        hands_text += f", RefState written {ref_dds.published} (rejected {ref_dds.rejected})"
                     control_text = (
                         f", mode requests ok {control.succeeded} failed {control.failed} dropped {control.dropped}"
                         if control is not None
@@ -294,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
                     window_ik_seconds = 0.0
             rate.sleep()
     finally:
-        # Teardown: input -> service worker -> hand publisher -> DDS channel -> ROS.
+        # Teardown: input -> service worker -> hand publisher -> ref publisher -> DDS channel -> ROS.
         if device is not None:
             device.close()
         events.enabled = False
@@ -302,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
             control.close()
         if hand_dds is not None:
             hand_dds.close()
+        if ref_dds is not None:
+            ref_dds.close()
         if channel is not None:
             channel.release()
         if ros is not None:

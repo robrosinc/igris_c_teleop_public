@@ -35,6 +35,46 @@ class _FakeHandCmd:
         self.motors = list(motors)
 
 
+class _FakeJointState:
+    def __init__(self):
+        self.value = None
+
+    def q(self, value):
+        self.value = value
+
+
+class _FakeTime:
+    def __init__(self):
+        self.sec_value = None
+        self.nanosec_value = None
+
+    def sec(self, value):
+        self.sec_value = value
+
+    def nanosec(self, value):
+        self.nanosec_value = value
+
+
+class _FakeHeader:
+    def __init__(self):
+        self.stamp_value = None
+
+    def stamp(self, value):
+        self.stamp_value = value
+
+
+class _FakeMasterArmState:
+    def __init__(self):
+        self.header_value = None
+        self.joints = None
+
+    def header(self, value):
+        self.header_value = value
+
+    def joint_state(self, joints):
+        self.joints = list(joints)
+
+
 class _FakeChannel:
     def __init__(self):
         self.init_args = None
@@ -133,6 +173,11 @@ def _fake_sdk(legacy_names: bool = False):
     fields = dict(
         ChannelFactory=_ChannelFactory,
         HandCmdPublisher=_publisher,
+        MasterArmStatePublisher=_publisher,
+        MasterArmState=_FakeMasterArmState,
+        JointState=_FakeJointState,
+        Header=_FakeHeader,
+        Time=_FakeTime,
         QosProfile=_Qos,
         parse_topic_naming=lambda value: value,
         IgrisC_Client=_FakeClient,
@@ -215,6 +260,48 @@ def test_hand_publisher_accepts_legacy_struct_names():
     broken = SimpleNamespace(ChannelFactory=sdk.ChannelFactory, HandCmdPublisher=sdk.HandCmdPublisher, QosProfile=sdk.QosProfile)
     with pytest.raises(SystemExit, match="MotorCmd"):
         dds_io.HandCmdDdsPublisher(dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG01", sdk=broken))
+
+
+# -- reference publisher --------------------------------------------------------------------
+
+
+def test_ref_state_publisher_writes_joints_and_stamp():
+    sdk, _channel, publishers = _fake_sdk()
+    dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
+    ref = dds_io.RefStateDdsPublisher(dds)
+    assert ref.topic == dds_io.DEFAULT_REF_TOPIC == "gmr/refstate"
+    assert ref.resolved_topic == "igris_c_IG07/gmr/refstate"
+    assert len(publishers) == 1 and publishers[0].topic == "gmr/refstate" and publishers[0].qos == "sensor-data"
+
+    joints = np.linspace(-1.0, 1.0, dds_io.REF_JOINT_COUNT)
+    ref.publish(joints, stamp=1_700_000_000.25)
+    (message,) = publishers[0].written
+    assert [joint.value for joint in message.joints] == pytest.approx(joints.tolist())
+    assert message.header_value.stamp_value.sec_value == 1_700_000_000
+    assert message.header_value.stamp_value.nanosec_value == 250_000_000
+    assert ref.published == 1 and ref.rejected == 0
+
+    # Rounding at the second boundary must not produce nanosec == 1e9.
+    ref.publish(joints, stamp=1_700_000_000.9999999999)
+    stamp = publishers[0].written[-1].header_value.stamp_value
+    assert (stamp.sec_value, stamp.nanosec_value) == (1_700_000_001, 0)
+
+    with pytest.raises(ValueError):
+        ref.publish(joints[:30], stamp=0.0)
+    with pytest.raises(ValueError):
+        ref.publish(np.r_[joints[:30], np.nan], stamp=0.0)
+    ref.close()
+    assert publishers[0].stops == 1
+
+
+def test_ref_state_publisher_requires_master_arm_types():
+    sdk, _channel, _ = _fake_sdk()
+    dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
+    broken = SimpleNamespace(
+        ChannelFactory=sdk.ChannelFactory, MasterArmStatePublisher=sdk.MasterArmStatePublisher, QosProfile=sdk.QosProfile
+    )
+    with pytest.raises(SystemExit, match="MasterArmState"):
+        dds_io.RefStateDdsPublisher(dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=broken))
 
 
 # -- control mode -------------------------------------------------------------------------

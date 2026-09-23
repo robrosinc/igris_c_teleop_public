@@ -22,6 +22,8 @@ headset (vr_system, VRS1 FlatBuffers over TCP -> this host :9102)
                                   motion_command term (6 wrist + 2 neck -> direct joint targets)
   -> HandTargets -> HandCmdDdsPublisher     DDS <ns>/handcmd  (12 normalized motors, 100 Hz)
   -> ControllerEvents -> ControlModeClient  DDS <ns>/service/control_mode/request
+  -> RefStateDdsPublisher (opt-in)          DDS <ns>/gmr/refstate  (리타깃 31관절, MasterArmState 타입, 100 Hz,
+                                            헤드셋 손 오버레이 표시 전용 - 로봇 브리지는 구독하지 않음)
 ```
 
 ROS 토픽에는 **전신 모션 프레임만** 실린다. 키: `fps, root_pos, root_rot(wxyz), root_vel,
@@ -139,7 +141,10 @@ igris_c 브리지(`dds_manager.cpp`)는 `service/control_mode/request`다. 옛 �
 주요 옵션: `--no_dds`(ROS만, 손/버튼 미전송), `--replay_vrs1 <file>`(헤드셋 없이 녹화 재생),
 `--finger_source auto|hand|grip|none`, `--dds_topic_naming native|ros_compatible`(로봇
 `igris_c.network.dds_topic_naming`과 일치), `--hand_dds_topic handcmd`, `--no_mode_events`,
-`--ros_domain_id 91`, `--invert_neck_yaw/--invert_neck_pitch`.
+`--ros_domain_id 91`, `--invert_neck_yaw/--invert_neck_pitch`,
+`--ref_dds_topic gmr/refstate`(리타깃 31관절을 `MasterArmState`로 함께 발행; vr_system
+`ARobotTeleopPawn`의 손 타깃 오버레이 입력. 지정하지 않으면 발행하지 않음. 계약은 vr_system
+`docs/Arm_Impedance_Overlay_Plan.md`).
 
 DDS 네임스페이스는 기본값이 없다. 틀린 네임스페이스는 오류 없이 아무 데도 도달하지 않으므로 시작
 로그의 resolve된 토픽명(`<ns>/handcmd`, `<ns>/service/control_mode/request`)을 로봇 브리지가
