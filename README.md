@@ -61,7 +61,7 @@ source/igris_c_gmr/         editable 설치되는 패키지; 콘솔 명령 `igri
   ros_publisher.py          rclpy String 퍼블리셔 (spin 없음)
   dds_io.py                 igris_c_sdk 채널, HandCmd 퍼블리셔, 제어모드 서비스 클라이언트(워커)
 tests/                      pytest; consumer_oracle.py = C++ 파서 포트
-thirdparty/{gmr, vr_link_schema, igris_c_sdk}   서브모듈
+thirdparty/{gmr, vr_link, igris_c_sdk}   서브모듈 (vr_link는 구 vr_link_schema 레포, 2026-09 개명)
 ```
 
 ## 환경 (pixi)
@@ -74,7 +74,9 @@ thirdparty/{gmr, vr_link_schema, igris_c_sdk}   서브모듈
   (`rclpy >=7.1.9,<8`, `std-msgs >=5.3.6,<6`, `rmw-fastrtps-cpp >=8.4.3,<9`). RoboStack `.so`는
   `RPATH`를 쓰므로 로그인 셸의 `LD_LIBRARY_PATH`(igris_c install, /opt/ros)가 상속되어도 환경 안의
   `librcl.so`가 우선한다(ldd로 확인).
-- **이 레포**(`source/igris_c_gmr`)와 **vr_link_schema**는 각자의 pyproject.toml로 editable 설치된다.
+- **이 레포**(`source/igris_c_gmr`)와 **vr_link**는 각자의 pyproject.toml로 editable 설치된다.
+  vr_link 2.0부터 import 루트가 두 개(`generated/python`, `src/vr_link`)라 핀을 올린 뒤에는
+  `pixi install`을 다시 돌려 editable 설치를 갱신해야 한다.
   `igris-c-gmr` 콘솔 명령이 환경 `bin/`에 생긴다.
 - **gmr**만 활성화 훅이 `PYTHONPATH`로 노출한다(setup.py가 smplx/opencv/redis를 강제하므로).
   `PYTHONPATH`는 처음부터 다시 쓰므로 로그인 셸의 `igris_c/install` rosidl `igris_c_sdk`가

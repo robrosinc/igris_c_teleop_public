@@ -1,7 +1,7 @@
 # pixi activation hook (sourced, not executed).
 #
 # ROS 2 comes from RoboStack packages inside this env; their own activation scripts set
-# AMENT_PREFIX_PATH, ROS_DISTRO, etc. The repo package and vr_link_schema are installed
+# AMENT_PREFIX_PATH, ROS_DISTRO, etc. The repo package and vr_link are installed
 # editable. The only thing left to expose by hand is the vendored gmr submodule, whose
 # setup.py pulls smplx/opencv/redis the producer does not need.
 #

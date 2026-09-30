@@ -263,7 +263,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2f/d0/f234961cb3ffbe381c3d82cd9c40fc7e67200c9f6b62a0f60235e74134b3/qpsolvers-4.13.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl
       - pypi: ./
-      - pypi: ./thirdparty/vr_link_schema
+      - pypi: ./thirdparty/vr_link
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-8_kmp_llvm.conda
   build_number: 8
@@ -716,7 +716,7 @@ packages:
 - pypi: ./
   name: igris-c-gmr
   version: 0.1.0
-  sha256: bd5395626f151eaa42cf65b0caec3910538f8af37e49eb1594eadc1fe1bbaac3
+  sha256: 76ccbce1b1c3a48f90f040f54c7e1ae1b3f195f7e473f4126b589ea1fd0d97a5
   requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/3e/2d/ca050652104bab2cf55e569db2a178b1b61cb041fef28307f2db383f6d9f/imageio-2.37.4-py3-none-any.whl
   name: imageio
@@ -4370,12 +4370,18 @@ packages:
   purls: []
   size: 748418
   timestamp: 1779015692186
-- pypi: ./thirdparty/vr_link_schema
-  name: vr-link-schema
-  version: 1.0.0
-  sha256: b71194dede026c94a501f0922a814ab5e092763e1720a3c7282171419fe6dc69
+- pypi: ./thirdparty/vr_link
+  name: vr-link
+  version: 2.0.0
+  sha256: 60e4d82177d7ad61580c5475e9ad542c122ce5b00d8d6d6930db2c68d0783aef
   requires_dist:
   - flatbuffers>=24,<26
+  - numpy>=1.24
+  - av>=13,<18 ; extra == 'video'
+  - pyyaml>=6 ; extra == 'yaml'
+  - opencv-python-headless>=4.8 ; extra == 'calibration'
+  - pyyaml>=6 ; extra == 'calibration'
+  - pytest>=8 ; extra == 'dev'
   requires_python: '>=3.9'
 - conda: https://conda.anaconda.org/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
   sha256: ba64b29b6d418024cb565081a1799262cb2780d2534ff4c14f76aa858c4286cd

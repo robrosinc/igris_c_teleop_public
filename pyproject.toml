@@ -6,7 +6,7 @@
 #     inside .pixi/envs and nothing is taken from a host /opt/ros install. Channel order
 #     and version bounds mirror the `core` feature of ~/workspace/repos/igris_c
 #     (pyproject.toml), which is the env the robot NUC runs;
-#   * this repo (source/igris_c_gmr) and thirdparty/vr_link_schema are installed editable
+#   * this repo (source/igris_c_gmr) and thirdparty/vr_link are installed editable
 #     from their own pyproject.toml, so no PYTHONPATH entry is needed for them;
 #   * thirdparty/gmr is used straight from the submodule via PYTHONPATH
 #     (scripts/activate_ros.sh): its setup.py pulls smplx/opencv/redis the producer does not need;
@@ -59,10 +59,11 @@ ros-jazzy-std-msgs = ">=5.3.6,<6"
 ros-jazzy-rmw-fastrtps-cpp = ">=8.4.3,<9"
 
 [tool.pixi.pypi-dependencies]
-# This repo and the VRS1 receiver, installed editable (source/ and thirdparty/vr_link_schema
-# stay the import roots; edits are live).
+# This repo and the VRS1 receiver, installed editable (source/ and thirdparty/vr_link
+# stay the import roots; edits are live). Repository and distribution were renamed
+# vr_link_schema / vr-link-schema -> vr_link / vr-link in 2026-09.
 igris_c_gmr = { path = ".", editable = true }
-vr-link-schema = { path = "thirdparty/vr_link_schema", editable = true }
+vr-link = { path = "thirdparty/vr_link", editable = true }
 # Versions are the ones the producer was exercised with in igris_c_teleop_env (2026-09).
 mujoco = ">=3.3"
 mink = ">=1.3"
@@ -73,7 +74,7 @@ rich = "*"
 joblib = "*"
 # general_motion_retargeting/__init__ imports robot_motion_viewer -> imageio (viewer unused by the producer).
 imageio = ">=2.34"
-# vr_link_schema/python (vr_link) decodes VRS1 FlatBuffers; must match the pinned flatc.
+# vr_link/src (vr_link) decodes VRS1 FlatBuffers; must match the pinned flatc.
 flatbuffers = ">=24,<26"
 
 [tool.pixi.activation]
