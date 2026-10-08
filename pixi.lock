@@ -4373,7 +4373,7 @@ packages:
 - pypi: ./thirdparty/vr_link
   name: vr-link
   version: 2.0.0
-  sha256: 60e4d82177d7ad61580c5475e9ad542c122ce5b00d8d6d6930db2c68d0783aef
+  sha256: 1306b2620afb7eee8fb15c96557b7474c591a3c3d8e23361ad4d2fbc2baeed10
   requires_dist:
   - flatbuffers>=24,<26
   - numpy>=1.24

@@ -24,6 +24,9 @@ headset (vr_system, VRS1 FlatBuffers over TCP -> this host :9102)
   -> ControllerEvents -> ControlModeClient  DDS <ns>/service/control_mode/request
   -> RefStateDdsPublisher (opt-in)          DDS <ns>/gmr/refstate  (리타깃 31관절, MasterArmState 타입, 100 Hz,
                                             헤드셋 손 오버레이 표시 전용 - 로봇 브리지는 구독하지 않음)
+  -> ControllerStatePublisher (vr_link)     DDS <ns>/vr/controller  (헤드셋 UI 녹화 토글 카운터, 세션 id, 컨트롤러
+                                            축 14개; Joy_ 타입, 100 Hz, 스켈레톤 연결 중에만. 에피소드 녹화기
+                                            (hit-tasks Isaac 브리지 등) 입력 전용 - 로봇 브리지는 구독하지 않음)
 ```
 
 ROS 토픽에는 **전신 모션 프레임만** 실린다. 키: `fps, root_pos, root_rot(wxyz), root_vel,
@@ -146,7 +149,11 @@ igris_c 브리지(`dds_manager.cpp`)는 `service/control_mode/request`다. 옛 �
 `--ros_domain_id 91`, `--invert_neck_yaw/--invert_neck_pitch`,
 `--ref_dds_topic gmr/refstate`(리타깃 31관절을 `MasterArmState`로 함께 발행; vr_system
 `ARobotTeleopPawn`의 손 타깃 오버레이 입력. 지정하지 않으면 발행하지 않음. 계약은 vr_system
-`docs/Arm_Impedance_Overlay_Plan.md`).
+`docs/Arm_Impedance_Overlay_Plan.md`), `--controller_dds_topic vr/controller` / `--no_controller_dds`
+(헤드셋 컨트롤러 중계: VRS1 `record_toggle_count`를 `session_id`, 컨트롤러 축과 함께 `Joy_`로 재발행.
+기본 켬. 레이아웃·발행 클래스는 vr_link `messages/teleop_dds.py`, `network/dds/teleop.py` 소유이며 이
+프로듀서는 호스팅과 재접속 카운트(`ConnectionSessions`)만 담당. 녹화기는 `(new - last) % 2` 파리티로
+토글하고 `session_id`가 바뀌면 다시 시드하므로 재접속이 녹화를 뒤집지 않는다. 로봇 명령이 아니다).
 
 DDS 네임스페이스는 기본값이 없다. 틀린 네임스페이스는 오류 없이 아무 데도 도달하지 않으므로 시작
 로그의 resolve된 토픽명(`<ns>/handcmd`, `<ns>/service/control_mode/request`)을 로봇 브리지가
@@ -169,7 +176,12 @@ native 네이밍의 bare `handcmd`를 구독한다. 로봇 NUC의 브리지 버�
    SDK `HandState`/`handcmd` 구독자로 12모터 id 11-16/21-26, q∈[0,1], 100 Hz, 스켈레톤 없을 때 0 Hz.
 7. 제어모드(승인 필요, 안전 자세): 오른 B / 오른 스틱 / 왼 스틱 각 1회 → 로그에 요청 1건씩과
    `accepted`; 로봇 모드 전환 확인; `--measure_fps`로 요청 중 루프 주기 유지. 누른 채 유지 시 재발화 없음.
-8. Ctrl-C: 깨끗한 종료, DDS/rmw abort 없음, exit 0.
+8. 컨트롤러 중계(로봇 영향 없음): vr_link `ControllerStateSubscriber`로 `<ns>/vr/controller` 구독,
+   스켈레톤 연결 중 100 Hz·끊기면 0 Hz, `frame_id vr_link.controller.v1`. 헤드셋 UI 녹화 토글 1회마다
+   `record_toggle_count` +1, 헤드셋 재접속마다 `session_id` +1(`--measure_fps` 로그의 `session`,
+   `toggle_count`로 대조). 녹화기(hit-tasks 브리지 `--record`)에서 토글 1회에 `recording started`,
+   다시 1회에 `stopped`, 재접속 직후에는 토글 없음.
+9. Ctrl-C: 깨끗한 종료, DDS/rmw abort 없음, exit 0.
 
 롤백: hit-bench의 Redis + `run_ros2_redis_bridge.sh` 경로는 그대로 남아 있다.
 

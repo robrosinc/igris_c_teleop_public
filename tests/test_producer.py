@@ -41,8 +41,19 @@ def test_defaults_match_port_plan():
     assert args.dds_topic_naming == "native" and args.hand_dds_topic == "handcmd"
     assert args.control_mode_timeout_ms == 3000
     assert not args.no_mode_events and args.replay_vrs1 is None
+    # Headset controller relay for recorders: on by default, name from the vr_link contract.
+    assert args.controller_dds_topic == "vr/controller" and not args.no_controller_dds
+    assert producer.parse_args(["--no_controller_dds"]).no_controller_dds
     for removed in ("redis_ip", "redis_port", "hand_dds", "auto_start_event", "stream_port"):
         assert not hasattr(args, removed), removed
+
+
+def test_controller_relay_uses_the_vr_link_contract():
+    from vr_link.messages import teleop_dds
+
+    assert producer.DEFAULT_CONTROLLER_TOPIC == teleop_dds.CONTROLLER_TOPIC
+    assert producer.ControllerStatePublisher.__module__ == "vr_link.network.dds.teleop"
+    assert producer.controller_sample_from_vr_state is teleop_dds.controller_sample_from_vr_state
 
 
 def test_dds_namespace_is_required_unless_no_dds():

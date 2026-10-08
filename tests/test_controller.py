@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from vr_link.types import VRInputState
 
-from igris_c_gmr.controller import EVENT_TO_CONTROL_MODE, ControllerEvents
+from igris_c_gmr.controller import EVENT_TO_CONTROL_MODE, ConnectionSessions, ControllerEvents
 from vr_fixtures import click
 
 
@@ -51,6 +51,18 @@ def test_simultaneous_and_disabled():
     assert disabled.update(True, click(right=True)) == {}
     disabled.enabled = True
     assert disabled.update(True, click(right=True)) == {}  # edge already consumed while disabled
+
+
+def test_connection_sessions_count_reconnections_only():
+    sessions = ConnectionSessions()
+    assert sessions.session_id == 0
+    assert sessions.update(False) == 0  # never connected yet
+    assert sessions.update(True) == 1  # first connection
+    assert sessions.update(True) == 1  # staying connected is not a new session
+    assert sessions.update(False) == 1  # losing the skeleton keeps the id until it returns
+    assert sessions.update(False) == 1
+    assert sessions.update(True) == 2  # reconnected: recorders re-seed the toggle parity
+    assert sessions.update(True) == 2
 
 
 def test_control_mode_table_matches_gmt_bridge():

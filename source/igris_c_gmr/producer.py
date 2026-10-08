@@ -12,6 +12,9 @@ Pipeline::
       -> ControllerEvents -> ControlModeClient                      <ns>/service/control_mode/request (DDS service)
       -> RefStateDdsPublisher (opt-in, --ref_dds_topic)             <ns>/gmr/refstate (DDS MasterArmState: the 31
                                                                     retargeted joints, headset hand-overlay display only)
+      -> ControllerStatePublisher (vr_link, --no_controller_dds)    <ns>/vr/controller (DDS Joy_: headset-UI recording
+                                                                    toggle counter, session id, controller axes; read by
+                                                                    episode recorders such as the hit-tasks Isaac bridge)
 
 Run order on the robot NUC (one terminal each):
   1. igris_c controller / bridge (DDS lowstate, lowcmd, handcmd, control-mode service) - human-operated.
@@ -29,7 +32,10 @@ Controller buttons (rising edge, once per press, while the skeleton is connected
 
 DDS outputs are ON by default (``--no_dds`` for a ROS-only session, e.g. with ``--replay_vrs1``).
 They move the robot and change its control mode: ROBROS hardware approval and the verification
-plan in README.md apply before running against the robot.
+plan in README.md apply before running against the robot. The controller relay on
+``vr/controller`` is state for recorders only (no robot command); the contract and the
+publisher class belong to vr_link (``vr_link.messages.teleop_dds``, ``vr_link.network.dds.teleop``),
+this producer merely hosts the publisher and counts headset (re)connections for ``session_id``.
 """
 
 from __future__ import annotations
@@ -42,8 +48,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+from vr_link.messages.teleop_dds import CONTROLLER_TOPIC as DEFAULT_CONTROLLER_TOPIC
+from vr_link.messages.teleop_dds import controller_sample_from_vr_state
+from vr_link.network.dds.teleop import ControllerStatePublisher
 
-from .controller import ControllerEvents
+from .controller import ConnectionSessions, ControllerEvents
 from .dds_io import (
     DEFAULT_HAND_TOPIC,
     DEFAULT_REF_TOPIC,
@@ -116,6 +125,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Also publish the 31 retargeted joints as MasterArmState on this bare topic (headset hand-overlay display "
         f"input, e.g. {DEFAULT_REF_TOPIC}). Off unless given; the robot bridge does not read it.",
     )
+    dds.add_argument(
+        "--controller_dds_topic",
+        type=str,
+        default=DEFAULT_CONTROLLER_TOPIC,
+        metavar="TOPIC",
+        help=f"Bare topic of the headset controller relay (vr_link teleop_dds Joy_ layout: record_toggle_count, "
+        f"session_id, connected, 14 controller axes) read by episode recorders such as the hit-tasks Isaac bridge. "
+        f"Default {DEFAULT_CONTROLLER_TOPIC}; published while the skeleton is connected.",
+    )
+    dds.add_argument("--no_controller_dds", action="store_true", help="Do not relay the headset controller state / recording toggle on DDS.")
 
     parser.add_argument("--measure_fps", action="store_true", help="Print solve rate, IK time and output counters every 2 s.")
     parser.add_argument("--log_level", type=str, default="INFO")
@@ -172,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     control: ControlModeClient | None = None
     hand_dds: HandCmdDdsPublisher | None = None
     ref_dds: RefStateDdsPublisher | None = None
+    controller_dds: ControllerStatePublisher | None = None
     ros: RetargetFrameRosPublisher | None = None
     device = None
     stop = False
@@ -209,8 +229,17 @@ def main(argv: list[str] | None = None) -> int:
                     ref_dds.resolved_topic,
                     args.target_fps,
                 )
+            if not args.no_controller_dds:
+                controller_dds = ControllerStatePublisher(channel.sdk, args.controller_dds_topic)
+                logger.info(
+                    "Controller relay (headset recording toggle + buttons, Joy_ type, recorder input only) on %s at %.0f Hz",
+                    channel.resolve(args.controller_dds_topic),
+                    args.target_fps,
+                )
         else:
-            logger.info("DDS disabled (--no_dds): ROS frame only; hand command, controller buttons and RefState are not sent.")
+            logger.info(
+                "DDS disabled (--no_dds): ROS frame only; hand command, controller buttons, RefState and the controller relay are not sent."
+            )
 
         ros = RetargetFrameRosPublisher(domain_id=args.ros_domain_id, topic=args.ros_topic, node_name=args.ros_node_name)
         logger.info("ROS 2 publisher %s on %s (domain %d, RELIABLE depth 1)", args.ros_node_name, args.ros_topic, args.ros_domain_id)
@@ -228,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
         rate = RateLimiter(frequency=args.target_fps, warn=False)
         was_connected = False
+        sessions = ConnectionSessions()
         last_ros_error_log = 0.0
         last_dds_error_log = 0.0
         window_start = time.monotonic()
@@ -238,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         while not stop:
             state = device.advance(0.0)
             connected = skeleton_complete(state)
+            session_id = sessions.update(connected)
             if connected != was_connected:
                 logger.info("VR skeleton %s", "connected" if connected else "lost; publishing stopped, consumers hold")
                 was_connected = connected
@@ -284,6 +315,16 @@ def main(argv: list[str] | None = None) -> int:
                     if now - last_dds_error_log > 2.0:
                         logger.warning("RefState DDS publish failed: %s", exc)
                         last_dds_error_log = now
+            if controller_dds is not None:
+                # Same wall-clock sample as the RefState stamp; only while connected, like every other output.
+                try:
+                    controller_dds.publish(
+                        controller_sample_from_vr_state(state, session_id=session_id, connected=True, stamp_ns=int(now * 1e9))
+                    )
+                except Exception as exc:
+                    if now - last_dds_error_log > 2.0:
+                        logger.warning("Controller relay DDS publish failed: %s", exc)
+                        last_dds_error_log = now
 
             try:
                 ros.publish(to_ros_payload(builder.build(qpos, now)))
@@ -310,6 +351,11 @@ def main(argv: list[str] | None = None) -> int:
                             hands_text += f", HandCmd written {hand_dds.published} (rejected {hand_dds.rejected})"
                     if ref_dds is not None:
                         hands_text += f", RefState written {ref_dds.published} (rejected {ref_dds.rejected})"
+                    if controller_dds is not None:
+                        hands_text += (
+                            f", Controller written {controller_dds.published} (rejected {controller_dds.rejected}, "
+                            f"session {session_id}, toggle_count {state.record_toggle_count})"
+                        )
                     control_text = (
                         f", mode requests ok {control.succeeded} failed {control.failed} dropped {control.dropped}"
                         if control is not None
@@ -330,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
                     window_ik_seconds = 0.0
             rate.sleep()
     finally:
-        # Teardown: input -> service worker -> hand publisher -> ref publisher -> DDS channel -> ROS.
+        # Teardown: input -> service worker -> hand publisher -> ref publisher -> controller relay -> DDS channel -> ROS.
         if device is not None:
             device.close()
         events.enabled = False
@@ -340,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
             hand_dds.close()
         if ref_dds is not None:
             ref_dds.close()
+        if controller_dds is not None:
+            controller_dds.close()
         if channel is not None:
             channel.release()
         if ros is not None:

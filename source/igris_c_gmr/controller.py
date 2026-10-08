@@ -50,4 +50,25 @@ class ControllerEvents:
         return triggered if self.enabled else {}
 
 
-__all__ = ["BUTTON_PRESSED_THRESHOLD", "EVENT_TO_CONTROL_MODE", "ControllerEvents"]
+class ConnectionSessions:
+    """Count headset skeleton (re)connections for the ``vr/controller`` ``session_id``.
+
+    The relayed ``record_toggle_count`` restarts when the headset reconnects.
+    Recorders re-seed their parity rule when ``session_id`` changes
+    (``vr_link.messages.teleop_dds.RecordToggleTracker``), so each lost ->
+    connected transition must produce a new id. Starts at 0 (never connected).
+    """
+
+    def __init__(self) -> None:
+        self.session_id = 0
+        self._connected = False
+
+    def update(self, connected: bool) -> int:
+        connected = bool(connected)
+        if connected and not self._connected:
+            self.session_id += 1
+        self._connected = connected
+        return self.session_id
+
+
+__all__ = ["BUTTON_PRESSED_THRESHOLD", "EVENT_TO_CONTROL_MODE", "ConnectionSessions", "ControllerEvents"]
