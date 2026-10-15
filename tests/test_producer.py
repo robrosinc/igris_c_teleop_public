@@ -63,3 +63,20 @@ def test_dds_namespace_is_required_unless_no_dds():
         producer.main(["--dds_namespace", "igris_c_IG01", "--finger_source", "none"])
     with pytest.raises(SystemExit, match="target_fps"):
         producer.main(["--no_dds", "--target_fps", "0"])
+
+
+def test_reference_shaping_defaults():
+    from vr_link.messages import teleop_dds
+
+    args = producer.parse_args([])
+    # Convergence ramp: on by default, 2 s smoothstep from LowState, 0.5 rad/s cap, hand 1.0/s.
+    assert not args.no_converge and args.converge_seconds == 2.0 and args.converge_max_rad_s == 0.5
+    assert args.converge_hand_rate == 1.0 and args.lowstate_max_age == 0.5
+    assert args.lowstate_dds_topic == "lowstate" and args.robotstate_dds_topic == "robotstate"
+    # Arm hold on bare-hand tracking loss: on by default, 0.2 s re-acquire, 0.5 rad/s release.
+    assert args.arm_hold == "on" and args.arm_hold_release_s == 0.2 and args.arm_hold_release_rad_s == 0.5
+    assert producer.parse_args(["--arm_hold", "off"]).arm_hold == "off"
+    # HUD feedback topic comes from the vr_link contract.
+    assert args.motion_feedback_dds_topic == teleop_dds.MOTION_FEEDBACK_TOPIC == "teleop/motion_feedback"
+    assert not args.no_motion_feedback_dds
+    assert producer.MotionFeedbackPublisher.__module__ == "vr_link.network.dds.teleop"

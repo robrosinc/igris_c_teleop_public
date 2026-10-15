@@ -18,6 +18,9 @@ headset (vr_system, VRS1 FlatBuffers over TCP -> this host :9102)
   -> vr_link.TcpVRDevice (gmr joint convention)
   -> GeneralMotionRetargeting(xrobot -> robros_igris_c_v2)          38 qpos = root 7 + 31 hinges
   -> NeckOverride                                                   HMD-relative neck yaw/pitch into qpos
+  -> ArmHold                                                        7 arm joints frozen while that bare hand is untracked
+  -> ConvergeGate (DDS lowstate + robotstate, VRS1 teleop_state)    31 hinges ramped from the robot's measured pose to the
+                                                                    operator on Start / Resume / low-level entry
   -> RetargetFramePayloadBuilder -> to_ros_payload (JSON)
   -> ROS 2 std_msgs/String  /gmr/teleop/retarget_frame  (domain 91, RELIABLE depth 1)
        -> igris_c_inference_node  motion term (23 policy joints -> ONNX WBC -> DDS lowcmd)
@@ -29,7 +32,45 @@ headset (vr_system, VRS1 FlatBuffers over TCP -> this host :9102)
   -> ControllerStatePublisher (vr_link)     DDS <ns>/vr/controller  (headset UI record-toggle counter, session id, 14 controller
                                             axes; Joy_ type, 100 Hz, only while the skeleton is connected. Input for episode
                                             recorders (hit-tasks Isaac bridge etc.) only - the robot bridge does not subscribe)
+  -> MotionFeedbackPublisher (vr_link)      DDS <ns>/teleop/motion_feedback  (converging flag + progress, per-arm hold; Joy_ type,
+                                            100 Hz while the skeleton is connected. Read by vr-link-stream into Signals for the
+                                            headset HUD only - the robot bridge does not subscribe)
 ```
+
+### Reference shaping (convergence ramp, arm hold)
+
+Both run after GMR and before any output, on the 38-qpos reference, so the ROS frame,
+`gmr/refstate` and the hand command all see the shaped values; the inference node and the
+robot bridge are untouched.
+
+- **Convergence ramp** (`converge.py`, `ramp.py`; on by default, `--no_converge` off). The
+  inference node copies the reference into `lowcmd` without any rate limit, so a Start or
+  Resume with the operator away from the robot's current pose would command a jump. The
+  gate subscribes to DDS `lowstate` (31 joint positions) and `robotstate` (control mode)
+  and, on a trigger, replaces the 31 hinge joints of the reference with a smoothstep blend
+  from the LowState pose to the live reference (`--converge_seconds 2.0`), with a per-joint
+  rate cap (`--converge_max_rad_s 0.5`) that extends the ramp when the distance is large;
+  the root pose is never touched. The hand command is rate-limited meanwhile
+  (`--converge_hand_rate 1.0`/s). Triggers: VRS1 `teleop_state` entering `Resuming`
+  (vr_system Start and Resume), the robot mode entering the low-level family
+  (`ROBOT_STATE_LOW` / `ROBOT_STATE_WALK_LOW`, read from the SDK binding) from a known other
+  mode, and, for a headset without the field (`Unknown`), the skeleton-connection edge. A
+  trigger without a LowState sample fresher than `--lowstate_max_age 0.5` s is skipped with
+  a warning (the reference then jumps as before). `--no_dds` disables the ramp (no LowState).
+- **Arm hold** (`arm_hold.py`; `--arm_hold on|off`, default on). With bare hands (no
+  controller) the PICO body tracker keeps sending wrist/elbow/shoulder joints after the hand
+  leaves the headset's view, and GMR would follow them. When the finger arbiter decides
+  `hold` for a hand (untracked, controller idle) or any of that arm's body joints arrives
+  `valid=false`, the 7 joints of that arm are frozen at the reference of the tick the hold
+  engaged (so the arm keeps its configuration relative to the torso). Once the hand is tracked
+  again for `--arm_hold_release_s 0.2` s, the held pose ramps to the live reference at
+  `--arm_hold_release_rad_s 0.5` (smoothstep 1 s). Per side, independent; fingers already
+  hold through `HandSourceArbiter`.
+- **Feedback** (`--motion_feedback_dds_topic teleop/motion_feedback`,
+  `--no_motion_feedback_dds`): `MotionFeedbackSample(converging, converge_progress,
+  arm_hold_left, arm_hold_right)` every tick while connected. `vr-link-stream` folds it into
+  the VRL2 `Signals` record; the headset HUD shows `CONVERGING xx%` (pill, popup ring) and an
+  arm-hold toast, also in NO CAMERA mode (the sender heartbeats `Signals` without video).
 
 The ROS topic carries **only the whole-body motion frame**. Keys: `fps, root_pos,
 root_rot(wxyz), root_vel, root_angvel, dof_pos, dof_vel (MJCF order, 31), keybody_pos_local,
@@ -66,9 +107,12 @@ source/igris_c_teleop/      package installed editable; console commands `igris-
   neck.py                   HMD-relative neck angles, MJCF range clamp
   hands.py                  12-motor normalized hand command (gmr igris_c_hand_command)
   controller.py             button edge detection, event -> control-mode table
+  ramp.py                   JointRamp (smoothstep + rate cap on selected qpos), RateLimiter
+  converge.py               ConvergeGate: Start/Resume/low-level-entry triggers, ramp from LowState, hand rate limit
+  arm_hold.py               ArmHold: per-arm freeze while the bare hand is untracked, debounced release ramp
   retarget_frame.py         FK keybody + velocities (finite difference, LPF) -> contract frame, JSON serialization
   ros_publisher.py          rclpy String publisher (no spin)
-  dds_io.py                 igris_c_sdk channel, HandCmd publisher, control-mode service client (worker)
+  dds_io.py                 igris_c_sdk channel, HandCmd/RefState publishers, LowState/RobotState readers, control-mode client
 tests/                      pytest; consumer_oracle.py = port of the C++ parser
 thirdparty/{gmr, vr_link, igris_c_sdk}   submodules (vr_link is the former vr_link_schema repo, renamed 2026-09;
                             since vr_link 2.1 it ships no SDK and its stream sender is launched from here)
@@ -198,7 +242,11 @@ axes as `Joy_`. On by default. Layout and publisher class are owned by vr_link
 `messages/teleop_dds.py` and `network/dds/teleop.py`; this producer only hosts them and
 counts reconnections (`ConnectionSessions`). The recorder toggles by `(new - last) % 2`
 parity and re-seeds when `session_id` changes, so a reconnect never flips recording. Not a
-robot command).
+robot command), the reference-shaping options above (`--no_converge`, `--converge_seconds`,
+`--converge_max_rad_s`, `--converge_hand_rate`, `--lowstate_max_age`, `--lowstate_dds_topic
+lowstate`, `--robotstate_dds_topic robotstate`, `--arm_hold on|off`, `--arm_hold_release_s`,
+`--arm_hold_release_rad_s`, `--motion_feedback_dds_topic teleop/motion_feedback`,
+`--no_motion_feedback_dds`).
 
 The DDS namespace has no default. A wrong namespace reaches nothing without any error, so
 compare the resolved topic names in the startup log (`<ns>/handcmd`,
@@ -234,8 +282,26 @@ prefix), match it with `--hand_dds_topic rt/handcmd`.
    bridge `--record`), one toggle gives `recording started`, the next `stopped`, and no toggle
    right after a reconnect.
 9. Ctrl-C: clean shutdown, no DDS/rmw abort, exit 0.
+10. Convergence ramp (simulation first, then torque ON only with approval and a safe
+    posture, hands clear). Headset in Paused with the operator's arms far from the robot's,
+    then Resume: the log shows `convergence ramp started (teleop_state RESUMING ...)`, the
+    `--measure_fps` line shows `converge ACTIVE xx%` reaching `idle` after ~2 s (longer when
+    the 0.5 rad/s cap binds); the robot moves smoothly, no jump, `ros2 topic echo` of
+    `dof_pos` shows a monotone blend. Same when the robot enters low-level control while the
+    headset is Active (`robot entered low-level control` trigger). With the producer started
+    before the robot bridge (no LowState), the trigger is logged as skipped and the reference
+    jumps as before. Headset HUD: pill `CONVERGING xx%` in cyan and the center ring; in NO
+    CAMERA mode as well. Pass: no visible jump at Start/Resume/low-level entry; the ramp
+    ends within `converge_seconds` + distance / cap.
+11. Arm hold (bare hands, torque OFF first). Cover one hand: the log shows `left arm HELD`,
+    the HUD toast names the arm, the robot arm stays still while the torso and the other arm
+    follow. Uncover: after 0.2 s `released`, the arm ramps back at <= 0.5 rad/s, toast gone.
+    Rapid cover/uncover within 0.2 s neither releases nor re-engages. Pass: no arm motion
+    while held, no jump on release.
 
-Rollback: the hit-bench Redis + `run_ros2_redis_bridge.sh` path is still in place.
+Rollback: `--no_converge --arm_hold off --no_motion_feedback_dds` restores the pre-2026-10
+producer behavior (reference jumps; arms follow the body tracker); the hit-bench Redis +
+`run_ros2_redis_bridge.sh` path is still in place.
 
 ## Open items (human confirmation)
 

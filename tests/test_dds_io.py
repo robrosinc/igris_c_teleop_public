@@ -113,6 +113,29 @@ class _FakePublisher:
         self.stops += 1
 
 
+class _FakeSubscriber:
+    def __init__(self, topic, qos):
+        self.topic = topic
+        self.qos = qos
+        self.callback = None
+        self.stops = 0
+
+    def init(self, callback):
+        self.callback = callback
+        return True
+
+    def stop(self):
+        self.stops += 1
+
+
+class _FakeLowState:
+    def __init__(self, q):
+        self._joints = [SimpleNamespace(q=lambda v=v: v) for v in q]
+
+    def joint_state(self):
+        return self._joints
+
+
 class _FakeResponse:
     def __init__(self, ok: bool, code: int = 0, message: str = "", request_id: str = "req-1"):
         self._ok, self._code, self._message, self._id = ok, code, message, request_id
@@ -170,10 +193,24 @@ def _fake_sdk(legacy_names: bool = False):
         def SensorData():
             return "sensor-data"
 
+        @staticmethod
+        def Default():
+            return "default"
+
+    subscribers = []
+
+    def _subscriber(topic, qos):
+        subscriber = _FakeSubscriber(topic, qos)
+        subscribers.append(subscriber)
+        return subscriber
+
     fields = dict(
         ChannelFactory=_ChannelFactory,
         HandCmdPublisher=_publisher,
         MasterArmStatePublisher=_publisher,
+        LowStateSubscriber=_subscriber,
+        RobotStateSubscriber=_subscriber,
+        subscribers=subscribers,
         MasterArmState=_FakeMasterArmState,
         JointState=_FakeJointState,
         Header=_FakeHeader,
@@ -365,3 +402,40 @@ def test_control_mode_client_rejects_binding_without_constants():
     dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
     with pytest.raises(SystemExit, match="CONTROL_MODE_CMD_MOTION_PRESET"):
         dds_io.ControlModeClient(dds, client=_FakeClient())
+
+
+# -- LowState / RobotState readers (convergence ramp inputs) ---------------------------------------
+
+
+def test_lowstate_subscriber_keeps_the_newest_31_joints_with_age():
+    sdk, _channel, _ = _fake_sdk()
+    dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
+    reader = dds_io.LowStateSubscriber(dds)
+    fake = sdk.subscribers[-1]
+    assert fake.topic == "lowstate" and fake.qos == "sensor-data" and reader.resolved_topic == "igris_c_IG07/lowstate"
+    assert reader.latest() is None
+    fake.callback(_FakeLowState(np.arange(40, dtype=float)))  # extra joints beyond 31 are ignored
+    sample = reader.latest()
+    assert sample is not None
+    q, age = sample
+    assert q.shape == (31,) and np.allclose(q, np.arange(31)) and 0.0 <= age < 1.0 and reader.received == 1
+    fake.callback(_FakeLowState(np.zeros(5)))  # short message: counted as an error, previous sample kept
+    assert reader.errors == 1 and np.allclose(reader.latest()[0], np.arange(31))
+    reader.close()
+    assert fake.stops == 1
+
+
+def test_robot_mode_subscriber_keeps_the_newest_mode():
+    sdk, _channel, _ = _fake_sdk()
+    dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
+    reader = dds_io.RobotModeSubscriber(dds, "robotstate")
+    fake = sdk.subscribers[-1]
+    assert fake.topic == "robotstate" and fake.qos == "default"
+    assert reader.latest() is None
+    fake.callback(SimpleNamespace(state=lambda: 3))
+    mode, age = reader.latest()
+    assert mode == 3 and 0.0 <= age < 1.0
+    fake.callback(SimpleNamespace(state=lambda: "bad"))
+    assert reader.errors == 1 and reader.latest()[0] == 3
+    reader.close()
+    assert fake.stops == 1

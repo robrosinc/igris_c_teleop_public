@@ -6,6 +6,9 @@ Pipeline::
       -> vr_link.TcpVRDevice (gmr joint convention adapter)
       -> GeneralMotionRetargeting(xrobot -> robros_igris_c_v2)      body IK, 38 qpos
       -> NeckOverride                                               HMD-relative neck into qpos
+      -> ArmHold                                                    arm joints frozen while the bare hand is untracked
+      -> ConvergeGate (LowState + robotstate + VRS1 teleop_state)   ramp from the robot's measured pose on Start /
+                                                                    Resume / low-level entry, 31 hinges in qpos
       -> RetargetFramePayloadBuilder -> RetargetFrameRosPublisher   /gmr/teleop/retarget_frame (String, domain 91)
                                                                     -> igris_c_inference_node (ONNX WBC -> DDS lowcmd)
       -> HandTargets -> HandCmdDdsPublisher                         <ns>/handcmd (DDS HandCmd, fingers bypass the policy)
@@ -15,6 +18,9 @@ Pipeline::
       -> ControllerStatePublisher (vr_link, --no_controller_dds)    <ns>/vr/controller (DDS Joy_: headset-UI recording
                                                                     toggle counter, session id, controller axes; read by
                                                                     episode recorders such as the hit-tasks Isaac bridge)
+      -> MotionFeedbackPublisher (vr_link, --no_motion_feedback_dds) <ns>/teleop/motion_feedback (DDS Joy_: converging +
+                                                                    progress, per-arm hold; vr-link-stream puts it into
+                                                                    Signals for the headset HUD)
 
 Run order on the robot NUC (one terminal each):
   1. igris_c controller / bridge (DDS lowstate, lowcmd, handcmd, control-mode service) - human-operated.
@@ -48,19 +54,27 @@ import time
 from pathlib import Path
 
 import numpy as np
+from general_motion_retargeting.hand_retarget.igris_c_hand_command import HandSourceArbiter
 from vr_link.messages.teleop_dds import CONTROLLER_TOPIC as DEFAULT_CONTROLLER_TOPIC
-from vr_link.messages.teleop_dds import controller_sample_from_vr_state
-from vr_link.network.dds.teleop import ControllerStatePublisher
+from vr_link.messages.teleop_dds import MOTION_FEEDBACK_TOPIC as DEFAULT_MOTION_FEEDBACK_TOPIC
+from vr_link.messages.teleop_dds import MotionFeedbackSample, controller_sample_from_vr_state
+from vr_link.network.dds.teleop import ControllerStatePublisher, MotionFeedbackPublisher
 
+from .arm_hold import SIDES, ArmHold
 from .controller import ConnectionSessions, ControllerEvents
+from .converge import ConvergeGate, low_level_modes_from_sdk
 from .dds_io import (
     DEFAULT_HAND_TOPIC,
+    DEFAULT_LOWSTATE_TOPIC,
     DEFAULT_REF_TOPIC,
+    DEFAULT_ROBOTSTATE_TOPIC,
     TOPIC_NAMINGS,
     ControlModeClient,
     DdsChannel,
     HandCmdDdsPublisher,
+    LowStateSubscriber,
     RefStateDdsPublisher,
+    RobotModeSubscriber,
 )
 from .hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
 from .neck import NeckOverride, head_relative_neck_angles
@@ -135,6 +149,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         f"Default {DEFAULT_CONTROLLER_TOPIC}; published while the skeleton is connected.",
     )
     dds.add_argument("--no_controller_dds", action="store_true", help="Do not relay the headset controller state / recording toggle on DDS.")
+    dds.add_argument(
+        "--motion_feedback_dds_topic",
+        type=str,
+        default=DEFAULT_MOTION_FEEDBACK_TOPIC,
+        metavar="TOPIC",
+        help=f"Bare topic of the motion feedback (vr_link teleop_dds Joy_ layout: converging flag + progress, per-arm hold) "
+        f"that vr-link-stream turns into Signals for the headset HUD. Default {DEFAULT_MOTION_FEEDBACK_TOPIC}.",
+    )
+    dds.add_argument("--no_motion_feedback_dds", action="store_true", help="Do not publish the motion feedback on DDS.")
+
+    converge = parser.add_argument_group("convergence ramp (reference starts at the robot's measured pose)")
+    converge.add_argument("--no_converge", action="store_true", help="Disable the ramp: the reference jumps to the operator as before.")
+    converge.add_argument("--converge_seconds", type=float, default=2.0, help="Smoothstep blend time from LowState to the live reference.")
+    converge.add_argument("--converge_max_rad_s", type=float, default=0.5, help="Per-joint rate cap while converging (0 = no cap).")
+    converge.add_argument("--converge_hand_rate", type=float, default=1.0, help="Normalized hand command rate cap (1/s) while converging.")
+    converge.add_argument("--lowstate_max_age", type=float, default=0.5, help="A trigger with an older LowState is skipped (seconds).")
+    converge.add_argument("--lowstate_dds_topic", type=str, default=DEFAULT_LOWSTATE_TOPIC, help="Bare LowState topic (robot joint positions).")
+    converge.add_argument("--robotstate_dds_topic", type=str, default=DEFAULT_ROBOTSTATE_TOPIC, help="Bare RobotState topic (control mode).")
+
+    hold = parser.add_argument_group("arm hold (bare hand untracked)")
+    hold.add_argument("--arm_hold", choices=("on", "off"), default="on", help="Freeze an arm's 7 joints while its bare hand is untracked or its body joints are invalid.")
+    hold.add_argument("--arm_hold_release_s", type=float, default=0.2, help="Hand must be tracked this long before the hold releases.")
+    hold.add_argument("--arm_hold_release_rad_s", type=float, default=0.5, help="Rate cap of the release ramp back to the live reference.")
 
     parser.add_argument("--measure_fps", action="store_true", help="Print solve rate, IK time and output counters every 2 s.")
     parser.add_argument("--log_level", type=str, default="INFO")
@@ -174,9 +211,26 @@ def main(argv: list[str] | None = None) -> int:
         pitch_sign=-1.0 if args.invert_neck_pitch else 1.0,
     )
     hands = HandTargets(args.finger_source)
+    # Arm hold needs a per-hand source decision even when the finger command is off.
+    hold_arbiter = HandSourceArbiter(None) if not hands.enabled else None
     events = ControllerEvents(enabled=not args.no_mode_events)
+    arm_hold = ArmHold(
+        gmr.model,
+        enabled=args.arm_hold == "on",
+        release_stable_s=args.arm_hold_release_s,
+        release_rate=args.arm_hold_release_rad_s,
+    )
+    converge = ConvergeGate(
+        np.arange(FREE_JOINT_QPOS_SIZE, builder.nq),
+        duration_s=args.converge_seconds,
+        max_rate=args.converge_max_rad_s,
+        hand_rate=args.converge_hand_rate,
+        lowstate_max_age_s=args.lowstate_max_age,
+        enabled=not args.no_converge and not args.no_dds,
+    )
     logger.info(
-        "GMR %s: nq=%d dof=%d keybodies=%d; neck override -> qpos%s (ranges %s); fingers=%s",
+        "GMR %s: nq=%d dof=%d keybodies=%d; neck override -> qpos%s (ranges %s); fingers=%s; arm hold %s (release after %.2f s, %.2f rad/s); "
+        "convergence ramp %s (%.1f s, %.2f rad/s cap, hand %.2f/s, LowState max age %.2f s)",
         args.robot,
         builder.nq,
         builder.dof_count,
@@ -184,14 +238,26 @@ def main(argv: list[str] | None = None) -> int:
         list(neck.qpos_addresses),
         [tuple(round(v, 3) for v in r) for r in neck.ranges],
         hands.source,
+        "on" if arm_hold.enabled else "off",
+        args.arm_hold_release_s,
+        args.arm_hold_release_rad_s,
+        "on" if converge.enabled else ("off (--no_converge)" if args.no_converge else "off (needs DDS LowState; --no_dds)"),
+        args.converge_seconds,
+        args.converge_max_rad_s,
+        args.converge_hand_rate,
+        args.lowstate_max_age,
     )
 
-    # Init order: DDS channel -> service client (before any other reader) -> hand publisher -> ref publisher -> ROS.
+    # Init order: DDS channel -> service client (before any other reader) -> hand publisher -> ref publisher ->
+    # feedback publisher -> LowState / RobotState readers -> ROS.
     channel: DdsChannel | None = None
     control: ControlModeClient | None = None
     hand_dds: HandCmdDdsPublisher | None = None
     ref_dds: RefStateDdsPublisher | None = None
     controller_dds: ControllerStatePublisher | None = None
+    feedback_dds: MotionFeedbackPublisher | None = None
+    lowstate_dds: LowStateSubscriber | None = None
+    mode_dds: RobotModeSubscriber | None = None
     ros: RetargetFrameRosPublisher | None = None
     device = None
     stop = False
@@ -236,9 +302,22 @@ def main(argv: list[str] | None = None) -> int:
                     channel.resolve(args.controller_dds_topic),
                     args.target_fps,
                 )
+            if not args.no_motion_feedback_dds:
+                feedback_dds = MotionFeedbackPublisher(channel.sdk, args.motion_feedback_dds_topic)
+                logger.info(
+                    "Motion feedback (converging, arm hold; Joy_ type, HUD input only) on %s at %.0f Hz",
+                    channel.resolve(args.motion_feedback_dds_topic),
+                    args.target_fps,
+                )
+            if converge.enabled:
+                converge.low_level_modes = low_level_modes_from_sdk(channel.sdk)
+                lowstate_dds = LowStateSubscriber(channel, args.lowstate_dds_topic)
+                mode_dds = RobotModeSubscriber(channel, args.robotstate_dds_topic)
+                logger.info("Convergence ramp triggers: VRS1 teleop_state RESUMING, robot modes %s on %s", sorted(converge.low_level_modes), mode_dds.resolved_topic)
         else:
             logger.info(
-                "DDS disabled (--no_dds): ROS frame only; hand command, controller buttons, RefState and the controller relay are not sent."
+                "DDS disabled (--no_dds): ROS frame only; hand command, controller buttons, RefState, the controller relay, "
+                "the motion feedback and the convergence ramp (needs LowState) are off."
             )
 
         ros = RetargetFrameRosPublisher(domain_id=args.ros_domain_id, topic=args.ros_topic, node_name=args.ros_node_name)
@@ -264,14 +343,19 @@ def main(argv: list[str] | None = None) -> int:
         window_count = 0
         window_ik_seconds = 0.0
         last_wait_log = time.monotonic()
+        last_teleop_state = None
 
         while not stop:
             state = device.advance(0.0)
             connected = skeleton_complete(state)
             session_id = sessions.update(connected)
+            connected_edge = connected and not was_connected
             if connected != was_connected:
                 logger.info("VR skeleton %s", "connected" if connected else "lost; publishing stopped, consumers hold")
                 was_connected = connected
+            if connected and state.teleop_state != last_teleop_state:
+                logger.info("headset teleop_state %s", state.teleop_state.name)
+                last_teleop_state = state.teleop_state
 
             for event in events.update(connected, state):
                 if control is not None:
@@ -281,6 +365,11 @@ def main(argv: list[str] | None = None) -> int:
             if not connected:
                 builder.reset()
                 hands.reset()
+                arm_hold.reset()
+                converge.reset()
+                last_teleop_state = None
+                if hold_arbiter is not None:
+                    hold_arbiter.reset()
                 if time.monotonic() - last_wait_log >= 5.0:
                     # A TCP client may be attached without sending VRS1 records yet:
                     # the headset streams poses only once its start countdown reaches Active.
@@ -300,6 +389,46 @@ def main(argv: list[str] | None = None) -> int:
 
             neck_yaw_pitch = neck.apply(qpos, head_relative_neck_angles(state))
             hand_values = hands.update(state)
+
+            # Reference shaping, in this order: arm hold (per side) then the convergence ramp (all hinges).
+            if hands.enabled:
+                hand_sources = dict(zip(SIDES, hands.active_sources))
+            else:
+                hand_sources = {
+                    "left": hold_arbiter.decide("left", state.left_hand, state.left_input),
+                    "right": hold_arbiter.decide("right", state.right_hand, state.right_input),
+                }
+            holding = arm_hold.update(
+                qpos,
+                now=now,
+                requests={side: ArmHold.hold_requested(state, side, hand_sources[side]) for side in SIDES},
+            )
+            mode_sample = mode_dds.latest() if mode_dds is not None else None
+            status = converge.update(
+                qpos,
+                now=now,
+                teleop_state=state.teleop_state,
+                connected_edge=connected_edge,
+                robot_mode=mode_sample[0] if mode_sample is not None else None,
+                lowstate=lowstate_dds.latest() if lowstate_dds is not None else None,
+            )
+            hand_values = converge.shape_hand(hand_values, now)
+
+            if feedback_dds is not None:
+                try:
+                    feedback_dds.publish(
+                        MotionFeedbackSample(
+                            converging=status.converging,
+                            converge_progress=status.progress,
+                            arm_hold_left=holding[0],
+                            arm_hold_right=holding[1],
+                            stamp_ns=int(now * 1e9),
+                        )
+                    )
+                except Exception as exc:
+                    if now - last_dds_error_log > 2.0:
+                        logger.warning("Motion feedback DDS publish failed: %s", exc)
+                        last_dds_error_log = now
             if hand_dds is not None and hand_values is not None:
                 try:
                     hand_dds.publish(hand_values)
@@ -361,8 +490,18 @@ def main(argv: list[str] | None = None) -> int:
                         if control is not None
                         else ""
                     )
+                    shaping_text = (
+                        f", teleop_state {state.teleop_state.name}, converge {'ACTIVE %.0f%%' % (100 * status.progress) if status.converging else 'idle'}"
+                        f" (started {converge.started}, skipped {converge.skipped}), arm hold L:{int(holding[0])} R:{int(holding[1])}"
+                    )
+                    if lowstate_dds is not None:
+                        sample = lowstate_dds.latest()
+                        shaping_text += f", LowState {'none' if sample is None else '%.2fs old' % sample[1]}"
+                    if mode_dds is not None:
+                        sample = mode_dds.latest()
+                        shaping_text += f", robot mode {'none' if sample is None else sample[0]}"
                     logger.info(
-                        "solve %.1f Hz, IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s",
+                        "solve %.1f Hz, IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s%s",
                         window_count / elapsed,
                         1e3 * window_ik_seconds / max(1, window_count),
                         ros.published,
@@ -370,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                         neck_text,
                         hands_text,
                         control_text,
+                        shaping_text,
                     )
                     window_start = time.monotonic()
                     window_count = 0
@@ -388,6 +528,12 @@ def main(argv: list[str] | None = None) -> int:
             ref_dds.close()
         if controller_dds is not None:
             controller_dds.close()
+        if feedback_dds is not None:
+            feedback_dds.close()
+        if lowstate_dds is not None:
+            lowstate_dds.close()
+        if mode_dds is not None:
+            mode_dds.close()
         if channel is not None:
             channel.release()
         if ros is not None:
