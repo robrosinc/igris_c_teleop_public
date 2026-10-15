@@ -7,7 +7,7 @@ import pytest
 from general_motion_retargeting.hand_retarget import igris_c_hand_command as hand_cmd
 from vr_link.types import ControllerInput
 
-from igris_c_gmr.hands import HandTargets
+from igris_c_teleop.hands import HandTargets
 from vr_fixtures import curl_from_tip_z, make_hand, make_state
 
 RIGHT = hand_cmd.RIGHT_MOTOR_SLOTS

@@ -11,8 +11,8 @@ from general_motion_retargeting.vr_uplink_convention import to_xrobot_convention
 from vr_link.tcp_device import VRS1_HEADER_SIZE
 from vr_link.types import BODY_JOINT_NAMES
 
-from igris_c_gmr import vrs1_source
-from igris_c_gmr.neck import head_relative_neck_angles
+from igris_c_teleop import vrs1_source
+from igris_c_teleop.neck import head_relative_neck_angles
 from vr_fixtures import IDENTITY, vrs1_record
 
 # Raw headset captures are not committed; point IGRIS_C_GMR_VRS1_DIR at a folder of .vrs1 files

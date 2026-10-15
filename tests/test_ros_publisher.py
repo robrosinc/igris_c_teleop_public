@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from igris_c_gmr import ros_publisher
+from igris_c_teleop import ros_publisher
 
 
 class _FakeString:
@@ -81,7 +81,7 @@ def test_publisher_contract_with_fake_rclpy():
     publisher = ros_publisher.RetargetFrameRosPublisher(ros=ros)
     assert calls["init"] == (None, 91, "no-handlers")  # inference domain; producer owns the signals
     (node,) = calls["nodes"]
-    assert node.name == "igris_c_gmr_producer"
+    assert node.name == "igris_c_teleop_producer"
     assert node.kwargs == {"enable_rosout": False, "start_parameter_services": False}
     (pub,) = node.publishers
     assert pub.topic == "/gmr/teleop/retarget_frame" and pub.msg_type is _FakeString
@@ -116,12 +116,12 @@ def test_real_rclpy_roundtrip():
     from std_msgs.msg import String
 
     os.environ.setdefault("ROS_LOCALHOST_ONLY", "1")
-    publisher = ros_publisher.RetargetFrameRosPublisher(domain_id=117, topic="/igris_c_gmr_test/frame", node_name="igris_c_gmr_test_pub")
+    publisher = ros_publisher.RetargetFrameRosPublisher(domain_id=117, topic="/igris_c_teleop_test/frame", node_name="igris_c_teleop_test_pub")
     received: list[str] = []
     context = rclpy.Context()
     context.init(domain_id=117)
-    node = rclpy.create_node("igris_c_gmr_test_sub", context=context)
-    node.create_subscription(String, "/igris_c_gmr_test/frame", lambda msg: received.append(msg.data), 1)
+    node = rclpy.create_node("igris_c_teleop_test_sub", context=context)
+    node.create_subscription(String, "/igris_c_teleop_test/frame", lambda msg: received.append(msg.data), 1)
     executor = rclpy.executors.SingleThreadedExecutor(context=context)
     executor.add_node(node)
     try:

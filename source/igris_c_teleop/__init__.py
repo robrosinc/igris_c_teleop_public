@@ -1,4 +1,4 @@
-"""igris_c_gmr: VRS1 headset teleoperation producer for the IGRIS-C policy runtime.
+"""igris_c_teleop: VRS1 headset teleoperation producer for the IGRIS-C policy runtime.
 
 VRS1 (vr_system headset) -> GMR retargeting -> ROS 2 motion-reference frame for
 ``igris_c_inference_node``; hand command and controller-driven control-mode

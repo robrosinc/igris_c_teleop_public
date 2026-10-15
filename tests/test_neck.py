@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from vr_link.types import VRInputState
 
-from igris_c_gmr import neck
+from igris_c_teleop import neck
 from vr_fixtures import make_state, pitch_quat, yaw_quat
 
 
@@ -66,7 +66,7 @@ def test_neck_override_none_keeps_gmr_neck_and_signs_flip(model, keyframe_qpos):
 
 
 def test_neck_override_ends_up_in_dof_pos(model, keyframe_qpos):
-    from igris_c_gmr.retarget_frame import RetargetFramePayloadBuilder
+    from igris_c_teleop.retarget_frame import RetargetFramePayloadBuilder
 
     qpos = keyframe_qpos.copy()
     neck.NeckOverride(model).apply(qpos, neck.head_relative_neck_angles(make_state(head_quat=yaw_quat(0.3))))

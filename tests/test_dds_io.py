@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 from general_motion_retargeting.hand_retarget import igris_c_hand_command as hand_cmd
 
-from igris_c_gmr import dds_io
-from igris_c_gmr.controller import EVENT_TO_CONTROL_MODE
+from igris_c_teleop import dds_io
+from igris_c_teleop.controller import EVENT_TO_CONTROL_MODE
 
 
 class _FakeMotorCmd:

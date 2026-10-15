@@ -64,7 +64,7 @@ CONTRACT_KEYS: tuple[str, ...] = (
 REQUIRED_CONSUMER_KEYS: tuple[str, ...] = ("dof_pos", "dof_vel", "root_rot", "link_body_list", "keybody_rot_local")
 
 FREE_JOINT_QPOS_SIZE = 7  # root pos (3) + root quat wxyz (4)
-DEFAULT_SOURCE_TAG = "igris_c_gmr"
+DEFAULT_SOURCE_TAG = "igris_c_teleop"
 
 
 def jsonable(value: Any) -> Any:

@@ -1,4 +1,4 @@
-# igris_c_gmr
+# igris_c_teleop
 
 VR headset (vr_system, VRS1) teleoperation **producer**. It retargets the human skeleton
 onto IGRIS-C with GMR, publishes the ROS 2 motion-reference topic that
@@ -59,7 +59,7 @@ pyproject.toml              pixi env (incl. RoboStack ROS) + tasks + package met
 scripts/activate_ros.sh     pixi activation hook: PYTHONPATH=thirdparty/gmr only (ROS, source and vr_link are installed in the env)
 scripts/install_sdk_wheel.sh
 scripts/setup.sh            fresh-clone setup: submodules, pixi install, task wheel, install-sdk, check-env
-source/igris_c_gmr/         package installed editable; console commands `igris-c-teleop` (session), `igris-c-gmr` (= python -m igris_c_gmr, producer)
+source/igris_c_teleop/      package installed editable; console commands `igris-c-teleop` (session), `igris-c-gmr` (= python -m igris_c_teleop, producer)
   teleop.py                 `igris-c-teleop` / `pixi run teleop`: producer + vr-link-stream as two supervised child processes, one namespace/domain
   producer.py               the producer itself (argparse, 100 Hz loop, init/teardown order); `pixi run producer` runs it alone
   vrs1_source.py            TcpVRDevice wrapper, .vrs1 replay, GMR input conversion
@@ -85,7 +85,7 @@ single env, `.pixi/envs/default`; the host `/opt/ros` is not used (switched 2026
   `rmw-fastrtps-cpp >=8.4.3,<9`). RoboStack `.so` files use `RPATH`, so even when the login
   shell's `LD_LIBRARY_PATH` (igris_c install, /opt/ros) is inherited, the env's `librcl.so`
   wins (verified with ldd).
-- **This repo** (`source/igris_c_gmr`) and **vr_link** are installed editable from their own
+- **This repo** (`source/igris_c_teleop`) and **vr_link** are installed editable from their own
   pyproject.toml. Since vr_link 2.0 has two import roots (`generated/python`, `src/vr_link`),
   re-run `pixi install` after bumping the pin to refresh the editable install.
   The `igris-c-gmr` console command lands in the env's `bin/`.
@@ -134,7 +134,10 @@ as `bash` and `ldd`, so use it only for Python tasks (`teleop`, `replay`).
   `pixi run test` / `test-ros` tasks already set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
 - Re-running `pixi install` keeps the pip-installed SDK wheel (it survived the env re-solve
   for the RoboStack switch on 2026-09-21).
-- The editable install creates `source/igris_c_gmr.egg-info/`. It is in `.gitignore`.
+- The editable install creates `source/igris_c_teleop.egg-info/`. It is in `.gitignore`.
+- The repository and package were renamed `igris_c_gmr` -> `igris_c_teleop` (2026-10-15).
+  Existing clones: `git remote set-url origin git@bitbucket.org:robrosinc/igris_c_teleop.git`,
+  then `pixi install` to refresh the editable install and remove `source/igris_c_gmr.egg-info/`.
 
 **Binding pitfall**: an old build's `.so` registered the DDS type name as
 `igris_c_sdk::msg::dds_::HandCmd_`, silently mismatching the robot bridge

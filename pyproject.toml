@@ -1,4 +1,4 @@
-# igris_c_gmr: VRS1 headset -> GMR -> ROS 2 motion reference + igris_c_sdk DDS producer.
+# igris_c_teleop: VRS1 headset -> GMR -> ROS 2 motion reference + igris_c_sdk DDS producer.
 #
 # The environment is managed by pixi (https://pixi.sh). One Python 3.12 process needs
 # GMR (mujoco/mink), rclpy and the igris_c_sdk pybind wheel at the same time:
@@ -6,7 +6,7 @@
 #     inside .pixi/envs and nothing is taken from a host /opt/ros install. Channel order
 #     and version bounds mirror the `core` feature of ~/workspace/repos/igris_c
 #     (pyproject.toml), which is the env the robot NUC runs;
-#   * this repo (source/igris_c_gmr) and thirdparty/vr_link are installed editable
+#   * this repo (source/igris_c_teleop) and thirdparty/vr_link are installed editable
 #     from their own pyproject.toml, so no PYTHONPATH entry is needed for them;
 #   * thirdparty/gmr is used straight from the submodule via PYTHONPATH
 #     (scripts/activate_ros.sh): its setup.py pulls smplx/opencv/redis the producer does not need;
@@ -24,7 +24,7 @@
 #   pixi run producer -- --dds_namespace igris_c_<unit>                    # producer only (dev/debug)
 
 [project]
-name = "igris_c_gmr"
+name = "igris_c_teleop"
 version = "0.1.0"
 description = "VRS1 headset teleoperation producer for the IGRIS-C whole-body policy runtime"
 requires-python = "==3.12.*"
@@ -34,8 +34,8 @@ readme = "README.md"
 dependencies = []
 
 [project.scripts]
-igris-c-gmr = "igris_c_gmr.producer:main"
-igris-c-teleop = "igris_c_gmr.teleop:main"
+igris-c-gmr = "igris_c_teleop.producer:main"
+igris-c-teleop = "igris_c_teleop.teleop:main"
 
 [build-system]
 requires = ["setuptools>=64"]
@@ -75,7 +75,7 @@ pyyaml = ">=6.0,<7"
 # This repo and the VRS1 receiver, installed editable (source/ and thirdparty/vr_link
 # stay the import roots; edits are live). Repository and distribution were renamed
 # vr_link_schema / vr-link-schema -> vr_link / vr-link in 2026-09.
-igris_c_gmr = { path = ".", editable = true }
+igris_c_teleop = { path = ".", editable = true }
 vr-link = { path = "thirdparty/vr_link", editable = true }
 # Versions are the ones the producer was exercised with in igris_c_teleop_env (2026-09).
 mujoco = ">=3.3"
@@ -102,7 +102,7 @@ replay = { cmd = "igris-c-gmr --no_dds --replay_vrs1", description = "Headset-fr
 # launch_testing's pytest plugin (if present in the env) autoloads and breaks collection.
 test = { cmd = "pytest tests -m 'not ros' -q", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1" } }
 test-ros = { cmd = "pytest tests -m ros -q", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1", ROS_LOCALHOST_ONLY = "1" } }
-check-env = { cmd = "python -c \"import rclpy, igris_c_sdk, mujoco, mink, vr_link, general_motion_retargeting, igris_c_gmr; print('igris_c_sdk:', igris_c_sdk.__file__); print('rclpy:', rclpy.__file__); print('ChannelFactory' in dir(igris_c_sdk) or 'SHADOWED by rosidl package')\"" }
+check-env = { cmd = "python -c \"import rclpy, igris_c_sdk, mujoco, mink, vr_link, general_motion_retargeting, igris_c_teleop; print('igris_c_sdk:', igris_c_sdk.__file__); print('rclpy:', rclpy.__file__); print('ChannelFactory' in dir(igris_c_sdk) or 'SHADOWED by rosidl package')\"" }
 
 [tool.pytest.ini_options]
 pythonpath = ["source", "tests"]

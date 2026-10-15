@@ -18,7 +18,7 @@ Pipeline::
 
 Run order on the robot NUC (one terminal each):
   1. igris_c controller / bridge (DDS lowstate, lowcmd, handcmd, control-mode service) - human-operated.
-  2. this producer:  python -m igris_c_gmr --dds_namespace <robot namespace> [--measure_fps]
+  2. this producer:  python -m igris_c_teleop --dds_namespace <robot namespace> [--measure_fps]
      then put the headset in Active so the skeleton streams ("VR skeleton connected" in the log).
   3. ros2 run igris_c_inference_public igris_c_inference_node --config <policy>/params.yaml
      The node needs 46 frames within 5 s of start, so step 2 must be streaming first.
@@ -68,14 +68,14 @@ from .retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, t
 from .ros_publisher import DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
 from .vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
 
-logger = logging.getLogger("igris_c_gmr")
+logger = logging.getLogger("igris_c_teleop")
 
 DEFAULT_ROBOT = "robros_igris_c_v2"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="python -m igris_c_gmr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        prog="python -m igris_c_teleop", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     vr = parser.add_argument_group("VRS1 input")
     vr.add_argument("--pose_host", type=str, default="0.0.0.0", help="Interface the VRS1 listener binds to.")

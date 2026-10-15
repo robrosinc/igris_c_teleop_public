@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from igris_c_gmr import producer
+from igris_c_teleop import producer
 
 PACKAGE_DIR = Path(producer.__file__).resolve().parent
 # Nothing from Redis, Isaac, or hit-bench may come back; torch is gmr's business, not ours.

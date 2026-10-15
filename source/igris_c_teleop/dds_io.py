@@ -28,7 +28,7 @@ import numpy as np
 from .controller import EVENT_TO_CONTROL_MODE
 from .hands import HAND_COMMAND_DIM, MOTOR_IDS
 
-logger = logging.getLogger("igris_c_gmr.dds")
+logger = logging.getLogger("igris_c_teleop.dds")
 
 DEFAULT_HAND_TOPIC = "handcmd"
 # Bare topic of the retargeted-joint reference stream read by the vr_system headset
@@ -280,7 +280,7 @@ class ControlModeClient:
         self.dropped = 0
         self.succeeded = 0
         self.failed = 0
-        self._worker = threading.Thread(target=self._run, name="igris_c_gmr-control-mode", daemon=True)
+        self._worker = threading.Thread(target=self._run, name="igris_c_teleop-control-mode", daemon=True)
         self._worker.start()
 
     @property

@@ -17,11 +17,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-logger = logging.getLogger("igris_c_gmr.ros")
+logger = logging.getLogger("igris_c_teleop.ros")
 
 DEFAULT_ROS_DOMAIN_ID = 91  # must match the igris_c_inference command.yaml source.params.domain_id
 DEFAULT_ROS_TOPIC = "/gmr/teleop/retarget_frame"
-DEFAULT_NODE_NAME = "igris_c_gmr_producer"
+DEFAULT_NODE_NAME = "igris_c_teleop_producer"
 
 
 def _import_ros() -> dict[str, Any]:

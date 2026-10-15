@@ -1198,9 +1198,9 @@ packages:
   size: 14459115
   timestamp: 1786545741408
 - pypi: ./
-  name: igris-c-gmr
+  name: igris-c-teleop
   version: 0.1.0
-  sha256: 0d28ab4e003bc7445467ec60e767db7535313b7a051f50c15304179ab1bdfad9
+  sha256: c06b8d2905b56cc80e3b59a8993657874a05b53e501d20b9b6478b11b331ce1d
   requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/3e/2d/ca050652104bab2cf55e569db2a178b1b61cb041fef28307f2db383f6d9f/imageio-2.37.4-py3-none-any.whl
   name: imageio

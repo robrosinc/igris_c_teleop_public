@@ -1,4 +1,4 @@
-"""``python -m igris_c_gmr`` entry point."""
+"""``python -m igris_c_teleop`` entry point."""
 
 from .producer import main
 

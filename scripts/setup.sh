@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh-clone setup for igris_c_gmr, end to end:
+# Fresh-clone setup for igris_c_teleop, end to end:
 #   1. submodules: gmr, vr_link (since vr_link 2.1 it carries no SDK of its own; this repo's
 #      top-level thirdparty/igris_c_sdk pin is the only one, see install_sdk_wheel.sh),
 #      igris_c_sdk with its nested cyclonedds / cyclonedds-cxx / pybind11

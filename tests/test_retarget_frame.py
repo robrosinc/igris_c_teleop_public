@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import consumer_oracle as oracle
-from igris_c_gmr import retarget_frame as rf
+from igris_c_teleop import retarget_frame as rf
 
 ROBOT = "robros_igris_c_v2"
 EXPECTED_DOF = 31

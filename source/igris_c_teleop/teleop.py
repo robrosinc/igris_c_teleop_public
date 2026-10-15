@@ -8,7 +8,7 @@ Starts two child processes of this pixi env with one DDS namespace/domain for bo
      calibration), usb -> ``stream_usb.yaml`` (stereo camera on this PC), mujoco ->
      ``stream_dds_mujoco.yaml``, isaac -> ``stream_dds_isaac.yaml``, shm ->
      ``stream_shm.yaml`` (simulator shared-memory segment).
-  2. the producer (``igris_c_gmr.producer``): VRS1 uplink (port 9102) -> GMR -> ROS 2
+  2. the producer (``igris_c_teleop.producer``): VRS1 uplink (port 9102) -> GMR -> ROS 2
      frame + HandCmd / control-mode DDS. Every argument this launcher does not know is
      passed to it unchanged (``--measure_fps``, ``--finger_source``, ...).
 
@@ -38,7 +38,7 @@ from typing import Sequence
 
 from .dds_io import TOPIC_NAMINGS
 
-logger = logging.getLogger("igris_c_gmr.teleop")
+logger = logging.getLogger("igris_c_teleop.teleop")
 
 # target -> (vr-link-stream --source, packaged vr_link config file)
 STREAM_TARGETS: dict[str, tuple[str, str]] = {
@@ -70,7 +70,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         prog="igris-c-teleop",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Unknown arguments are forwarded to the producer (python -m igris_c_gmr --help).",
+        epilog="Unknown arguments are forwarded to the producer (python -m igris_c_teleop --help).",
     )
     dds = parser.add_argument_group("DDS (shared by both processes)")
     dds.add_argument(
@@ -143,7 +143,7 @@ def build_commands(args: argparse.Namespace, producer_args: Sequence[str]) -> li
         commands.append(ChildCommand("vr-link-stream", stream_argv))
 
     producer_argv = [
-        python, "-m", "igris_c_gmr",
+        python, "-m", "igris_c_teleop",
         "--dds_namespace", args.dds_namespace,
         "--dds_domain_id", str(args.dds_domain_id),
         "--dds_topic_naming", args.dds_topic_naming,

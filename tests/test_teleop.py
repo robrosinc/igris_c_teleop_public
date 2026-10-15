@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from igris_c_gmr import teleop
+from igris_c_teleop import teleop
 
 NS = ["--dds_namespace", "igris_c_test"]
 
@@ -27,7 +27,7 @@ def test_default_target_is_robot_dds_with_packaged_config():
     assert config.name == "stream_dds.yaml" and config.is_file()
     assert stream.argv[stream.argv.index("--dds-namespace") + 1] == "igris_c_test"
     assert stream.argv[stream.argv.index("--dds-domain") + 1] == "0"
-    assert producer.argv[:3] == [sys.executable, "-m", "igris_c_gmr"]
+    assert producer.argv[:3] == [sys.executable, "-m", "igris_c_teleop"]
     assert producer.argv[3:] == [
         "--dds_namespace", "igris_c_test", "--dds_domain_id", "0", "--dds_topic_naming", "native",
     ]
