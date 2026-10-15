@@ -59,8 +59,9 @@ pyproject.toml              pixi env (incl. RoboStack ROS) + tasks + package met
 scripts/activate_ros.sh     pixi activation hook: PYTHONPATH=thirdparty/gmr only (ROS, source and vr_link are installed in the env)
 scripts/install_sdk_wheel.sh
 scripts/setup.sh            fresh-clone setup: submodules, pixi install, task wheel, install-sdk, check-env
-source/igris_c_gmr/         package installed editable; console command `igris-c-gmr` (= python -m igris_c_gmr)
-  producer.py               entry point (argparse, 100 Hz loop, init/teardown order)
+source/igris_c_gmr/         package installed editable; console commands `igris-c-teleop` (session), `igris-c-gmr` (= python -m igris_c_gmr, producer)
+  teleop.py                 `igris-c-teleop` / `pixi run teleop`: producer + vr-link-stream as two supervised child processes, one namespace/domain
+  producer.py               the producer itself (argparse, 100 Hz loop, init/teardown order); `pixi run producer` runs it alone
   vrs1_source.py            TcpVRDevice wrapper, .vrs1 replay, GMR input conversion
   neck.py                   HMD-relative neck angles, MJCF range clamp
   hands.py                  12-motor normalized hand command (gmr igris_c_hand_command)
@@ -69,7 +70,8 @@ source/igris_c_gmr/         package installed editable; console command `igris-c
   ros_publisher.py          rclpy String publisher (no spin)
   dds_io.py                 igris_c_sdk channel, HandCmd publisher, control-mode service client (worker)
 tests/                      pytest; consumer_oracle.py = port of the C++ parser
-thirdparty/{gmr, vr_link, igris_c_sdk}   submodules (vr_link is the former vr_link_schema repo, renamed 2026-09)
+thirdparty/{gmr, vr_link, igris_c_sdk}   submodules (vr_link is the former vr_link_schema repo, renamed 2026-09;
+                            since vr_link 2.1 it ships no SDK and its stream sender is launched from here)
 ```
 
 ## Environment (pixi)
@@ -93,6 +95,11 @@ single env, `.pixi/envs/default`; the host `/opt/ros` is not used (switched 2026
 - The **igris_c_sdk wheel** is built by a human and installed with pip. Its `.so` links the
   host libssl/libstdc++, but the producer initializes ROS first, so the real process loads
   the env's libssl/libstdc++ first and the SDK reuses them (verified via `/proc/self/maps`).
+  It is the only SDK checkout: vr_link 2.1 vendors none and its DDS layer imports the
+  wheel from this env.
+- **vr-link-stream deps**: conda `av`, `opencv`, `pyyaml` (vr_link's `video` and
+  `calibration` features, same bounds) are in this env because `pixi run teleop` starts
+  vr_link's VRL2 sender here.
 
 ```bash
 # Fresh clone in one go: submodules + pixi install + task wheel + install-sdk + check-env
@@ -148,10 +155,22 @@ SDK version and path at startup; confirm it is the wheel built from the submodul
 
 1. igris_c controller/bridge (DDS `lowstate`, `lowcmd`, `handcmd`, control-mode service),
    started by a human.
-2. The producer:
+2. The teleop session (producer + headset video downlink), or the producer alone:
    ```bash
-   pixi run teleop -- --dds_namespace igris_c_<unit> --measure_fps
+   pixi run teleop -- --dds_namespace igris_c_<unit> --target robot --measure_fps    # producer + vr-link-stream
+   pixi run producer -- --dds_namespace igris_c_<unit> --measure_fps                 # producer only (dev/debug)
    ```
+   `teleop` starts `vr-link-stream` (vr_link's VRL2 sender: camera, calibration and
+   frame-matched robot state on ports 9100/9101) and the producer as two child
+   processes of this env with the same namespace/domain, forwards Ctrl-C to both and
+   stops the survivor when one exits. `--target` selects the packaged vr_link config:
+   `robot` (igris_c_camera DDS topic + the measured calibration under
+   `thirdparty/vr_link/data/calibration/`), `usb` (stereo camera on this PC, same
+   calibration), `mujoco`, `isaac` (ideal calibrations) or `shm`. Unknown arguments go
+   to the producer; `--no_stream` equals `producer`;
+   `--dry_run` prints both command lines. A non-native `--dds_topic_naming` needs
+   `--stream_config` (the sender reads `dds.topic_naming` from its file only).
+   Before 2026-10-15 `pixi run teleop` meant the producer alone; that is `producer` now.
    Put the headset in Active and confirm `VR skeleton connected` in the log.
 3. `ros2 run igris_c_inference_public igris_c_inference_node --config <policy>/params.yaml`
    (command.yaml `source.params.domain_id` is 91, topic `/gmr/teleop/retarget_frame`).

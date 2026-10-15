@@ -11,11 +11,17 @@
 #   * thirdparty/gmr is used straight from the submodule via PYTHONPATH
 #     (scripts/activate_ros.sh): its setup.py pulls smplx/opencv/redis the producer does not need;
 #   * the igris_c_sdk wheel is built by a human (`task wheel` in thirdparty/igris_c_sdk) and
-#     installed with `pixi run install-sdk`.
+#     installed with `pixi run install-sdk`. This is the only SDK checkout: vr_link 2.1
+#     vendors none and relies on the host env's wheel;
+#   * this env also runs vr_link's VRL2 sender (`vr-link-stream`, started next to the
+#     producer by `pixi run teleop`), so it carries vr_link's `video` (PyAV) and
+#     `calibration` (OpenCV, pyyaml) feature dependencies, same bounds as vr_link's
+#     own pixi manifest.
 #
 #   pixi install && pixi run install-sdk
 #   pixi run test
-#   pixi run teleop -- --dds_namespace igris_c_<unit>
+#   pixi run teleop -- --dds_namespace igris_c_<unit> --target robot       # producer + headset video downlink
+#   pixi run producer -- --dds_namespace igris_c_<unit>                    # producer only (dev/debug)
 
 [project]
 name = "igris_c_gmr"
@@ -29,6 +35,7 @@ dependencies = []
 
 [project.scripts]
 igris-c-gmr = "igris_c_gmr.producer:main"
+igris-c-teleop = "igris_c_gmr.teleop:main"
 
 [build-system]
 requires = ["setuptools>=64"]
@@ -57,6 +64,12 @@ pytest = ">=8"
 ros-jazzy-rclpy = ">=7.1.9,<8"
 ros-jazzy-std-msgs = ">=5.3.6,<6"
 ros-jazzy-rmw-fastrtps-cpp = ">=8.4.3,<9"
+# --- vr-link-stream (vr_link `video` + `calibration` features, bounds copied from
+# thirdparty/vr_link/pyproject.toml). conda-forge ffmpeg behind PyAV carries libx264,
+# h264_nvenc, h264_vaapi, h264_qsv; OpenCV decodes the camera JPEG topic.
+av = ">=17.0.1,<18"
+opencv = ">=4.10,<5"
+pyyaml = ">=6.0,<7"
 
 [tool.pixi.pypi-dependencies]
 # This repo and the VRS1 receiver, installed editable (source/ and thirdparty/vr_link
@@ -82,7 +95,9 @@ scripts = ["scripts/activate_ros.sh"]
 
 [tool.pixi.tasks]
 install-sdk = { cmd = "bash scripts/install_sdk_wheel.sh", description = "Install the igris_c_sdk wheel from thirdparty/igris_c_sdk/dist (build it first with `task wheel` there)" }
-teleop = { cmd = "igris-c-gmr", description = "Run the producer (append -- --dds_namespace <ns> ...)" }
+# teleop = the full session (producer + vr-link-stream, two child processes); producer = the producer alone.
+teleop = { cmd = "igris-c-teleop", description = "Teleop session: producer + vr-link-stream headset video downlink (append -- --dds_namespace <ns> [--target robot|usb|mujoco|isaac|shm] [producer args])" }
+producer = { cmd = "igris-c-gmr", description = "Run the producer alone, no video downlink (append -- --dds_namespace <ns> ...)" }
 replay = { cmd = "igris-c-gmr --no_dds --replay_vrs1", description = "Headset-free ROS-only replay (append -- <file>.vrs1)" }
 # launch_testing's pytest plugin (if present in the env) autoloads and breaks collection.
 test = { cmd = "pytest tests -m 'not ros' -q", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1" } }
