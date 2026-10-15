@@ -34,8 +34,8 @@ readme = "README.md"
 dependencies = []
 
 [project.scripts]
-igris-c-gmr = "igris_c_teleop.producer:main"
-igris-c-teleop = "igris_c_teleop.teleop:main"
+igris-c-gmr = "igris_c_teleop.app.producer:main"
+igris-c-teleop = "igris_c_teleop.app.teleop:main"
 
 [build-system]
 requires = ["setuptools>=64"]

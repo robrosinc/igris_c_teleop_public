@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from igris_c_teleop import ros_publisher
+from igris_c_teleop.ros import publisher as ros_publisher
 
 
 class _FakeString:

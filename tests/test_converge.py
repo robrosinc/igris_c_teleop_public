@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from vr_link.types import TeleopState
 
-from igris_c_teleop.converge import TRIGGER_CONNECT, TRIGGER_LOW_LEVEL, TRIGGER_RESUME, ConvergeGate, low_level_modes_from_sdk
+from igris_c_teleop.shaping.converge import TRIGGER_CONNECT, TRIGGER_LOW_LEVEL, TRIGGER_RESUME, ConvergeGate, low_level_modes_from_sdk
 
 HINGES = np.arange(7, 38)
 LOW, WALK, WALK_LOW = 3, 10, 6

@@ -1200,7 +1200,7 @@ packages:
 - pypi: ./
   name: igris-c-teleop
   version: 0.1.0
-  sha256: c06b8d2905b56cc80e3b59a8993657874a05b53e501d20b9b6478b11b331ce1d
+  sha256: ab07203246753e4a6584766ddbaa29eb19ff11dd7e54dd306a93e0dd82f110d9
   requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/3e/2d/ca050652104bab2cf55e569db2a178b1b61cb041fef28307f2db383f6d9f/imageio-2.37.4-py3-none-any.whl
   name: imageio

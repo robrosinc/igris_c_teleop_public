@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from vr_link.types import VRInputState
 
-from igris_c_teleop.controller import EVENT_TO_CONTROL_MODE, ConnectionSessions, ControllerEvents
+from igris_c_teleop.uplink.controller import EVENT_TO_CONTROL_MODE, ConnectionSessions, ControllerEvents
 from vr_fixtures import click
 
 

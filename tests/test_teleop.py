@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from igris_c_teleop import teleop
+from igris_c_teleop.app import teleop
 
 NS = ["--dds_namespace", "igris_c_test"]
 

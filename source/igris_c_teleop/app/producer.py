@@ -60,10 +60,7 @@ from vr_link.messages.teleop_dds import MOTION_FEEDBACK_TOPIC as DEFAULT_MOTION_
 from vr_link.messages.teleop_dds import MotionFeedbackSample, controller_sample_from_vr_state
 from vr_link.network.dds.teleop import ControllerStatePublisher, MotionFeedbackPublisher
 
-from .arm_hold import SIDES, ArmHold
-from .controller import ConnectionSessions, ControllerEvents
-from .converge import ConvergeGate, low_level_modes_from_sdk
-from .dds_io import (
+from ..dds import (
     DEFAULT_HAND_TOPIC,
     DEFAULT_LOWSTATE_TOPIC,
     DEFAULT_REF_TOPIC,
@@ -76,11 +73,14 @@ from .dds_io import (
     RefStateDdsPublisher,
     RobotModeSubscriber,
 )
-from .hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
-from .neck import NeckOverride, head_relative_neck_angles
-from .retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, to_ros_payload
-from .ros_publisher import DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
-from .vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
+from ..retarget.hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
+from ..retarget.neck import NeckOverride, head_relative_neck_angles
+from ..retarget.retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, to_ros_payload
+from ..ros.publisher import DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
+from ..shaping.arm_hold import SIDES, ArmHold
+from ..shaping.converge import ConvergeGate, low_level_modes_from_sdk
+from ..uplink.controller import ConnectionSessions, ControllerEvents
+from ..uplink.vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
 
 logger = logging.getLogger("igris_c_teleop")
 

@@ -27,7 +27,7 @@ from vr_link.types import BODY_JOINT_NAMES, VRInputState
 
 from .ramp import JointRamp
 
-logger = logging.getLogger("igris_c_teleop.arm_hold")
+logger = logging.getLogger("igris_c_teleop.shaping.arm_hold")
 
 SIDES = ("left", "right")
 _SIDE_SUFFIX = {"left": "Left", "right": "Right"}

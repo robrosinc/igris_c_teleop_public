@@ -8,7 +8,7 @@ Starts two child processes of this pixi env with one DDS namespace/domain for bo
      calibration), usb -> ``stream_usb.yaml`` (stereo camera on this PC), mujoco ->
      ``stream_dds_mujoco.yaml``, isaac -> ``stream_dds_isaac.yaml``, shm ->
      ``stream_shm.yaml`` (simulator shared-memory segment).
-  2. the producer (``igris_c_teleop.producer``): VRS1 uplink (port 9102) -> GMR -> ROS 2
+  2. the producer (``igris_c_teleop.app.producer``): VRS1 uplink (port 9102) -> GMR -> ROS 2
      frame + HandCmd / control-mode DDS. Every argument this launcher does not know is
      passed to it unchanged (``--measure_fps``, ``--finger_source``, ...).
 
@@ -36,7 +36,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Sequence
 
-from .dds_io import TOPIC_NAMINGS
+from ..dds import TOPIC_NAMINGS
 
 logger = logging.getLogger("igris_c_teleop.teleop")
 

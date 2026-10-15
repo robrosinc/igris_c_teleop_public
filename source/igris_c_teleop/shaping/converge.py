@@ -35,7 +35,7 @@ from vr_link.types import TeleopState
 
 from .ramp import JointRamp, RateLimiter
 
-logger = logging.getLogger("igris_c_teleop.converge")
+logger = logging.getLogger("igris_c_teleop.shaping.converge")
 
 # igris_c_sdk RobotState_.state() values of the modes in which lowcmd drives the joints.
 # Mirrors ROBOT_STATE_LOW / ROBOT_STATE_WALK_LOW of the pinned SDK (checked at start-up

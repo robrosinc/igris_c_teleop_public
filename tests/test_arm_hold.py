@@ -7,7 +7,7 @@ from dataclasses import replace
 import numpy as np
 from vr_link.types import BODY_JOINT_NAMES, TrackedPose
 
-from igris_c_teleop.arm_hold import ArmHold, arm_chain_valid, arm_qpos_addresses
+from igris_c_teleop.shaping.arm_hold import ArmHold, arm_chain_valid, arm_qpos_addresses
 from vr_fixtures import make_hand, make_state
 
 LEFT_ARM_HINGES = list(range(7 + 15, 7 + 22))

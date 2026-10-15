@@ -43,7 +43,7 @@ Both run after GMR and before any output, on the 38-qpos reference, so the ROS f
 `gmr/refstate` and the hand command all see the shaped values; the inference node and the
 robot bridge are untouched.
 
-- **Convergence ramp** (`converge.py`, `ramp.py`; on by default, `--no_converge` off). The
+- **Convergence ramp** (`shaping/converge.py`, `shaping/ramp.py`; on by default, `--no_converge` off). The
   inference node copies the reference into `lowcmd` without any rate limit, so a Start or
   Resume with the operator away from the robot's current pose would command a jump. The
   gate subscribes to DDS `lowstate` (31 joint positions) and `robotstate` (control mode)
@@ -57,7 +57,7 @@ robot bridge are untouched.
   mode, and, for a headset without the field (`Unknown`), the skeleton-connection edge. A
   trigger without a LowState sample fresher than `--lowstate_max_age 0.5` s is skipped with
   a warning (the reference then jumps as before). `--no_dds` disables the ramp (no LowState).
-- **Arm hold** (`arm_hold.py`; `--arm_hold on|off`, default on). With bare hands (no
+- **Arm hold** (`shaping/arm_hold.py`; `--arm_hold on|off`, default on). With bare hands (no
   controller) the PICO body tracker keeps sending wrist/elbow/shoulder joints after the hand
   leaves the headset's view, and GMR would follow them. When the finger arbiter decides
   `hold` for a hand (untracked, controller idle) or any of that arm's body joints arrives
@@ -100,19 +100,30 @@ pyproject.toml              pixi env (incl. RoboStack ROS) + tasks + package met
 scripts/activate_ros.sh     pixi activation hook: PYTHONPATH=thirdparty/gmr only (ROS, source and vr_link are installed in the env)
 scripts/install_sdk_wheel.sh
 scripts/setup.sh            fresh-clone setup: submodules, pixi install, task wheel, install-sdk, check-env
-source/igris_c_teleop/      package installed editable; console commands `igris-c-teleop` (session), `igris-c-gmr` (= python -m igris_c_teleop, producer)
-  teleop.py                 `igris-c-teleop` / `pixi run teleop`: producer + vr-link-stream as two supervised child processes, one namespace/domain
-  producer.py               the producer itself (argparse, 100 Hz loop, init/teardown order); `pixi run producer` runs it alone
-  vrs1_source.py            TcpVRDevice wrapper, .vrs1 replay, GMR input conversion
-  neck.py                   HMD-relative neck angles, MJCF range clamp
-  hands.py                  12-motor normalized hand command (gmr igris_c_hand_command)
-  controller.py             button edge detection, event -> control-mode table
-  ramp.py                   JointRamp (smoothstep + rate cap on selected qpos), RateLimiter
-  converge.py               ConvergeGate: Start/Resume/low-level-entry triggers, ramp from LowState, hand rate limit
-  arm_hold.py               ArmHold: per-arm freeze while the bare hand is untracked, debounced release ramp
-  retarget_frame.py         FK keybody + velocities (finite difference, LPF) -> contract frame, JSON serialization
-  ros_publisher.py          rclpy String publisher (no spin)
-  dds_io.py                 igris_c_sdk channel, HandCmd/RefState publishers, LowState/RobotState readers, control-mode client
+source/igris_c_teleop/      package installed editable; console commands `igris-c-teleop` (session), `igris-c-gmr` (= python -m igris_c_teleop, producer).
+                            Sub-packages follow the data flow (headset -> retarget -> shaping -> outputs); imports only go downstream.
+  app/                      entry points
+    producer.py             the producer itself (argparse, 100 Hz loop, init/teardown order); `pixi run producer` runs it alone
+    teleop.py               `igris-c-teleop` / `pixi run teleop`: producer + vr-link-stream as two supervised child processes, one namespace/domain
+  uplink/                   headset -> producer (VRS1)
+    vrs1_source.py          TcpVRDevice wrapper, .vrs1 replay, GMR input conversion
+    controller.py           button edge detection, event -> control-mode table, ConnectionSessions
+  retarget/                 GMR output -> reference
+    neck.py                 HMD-relative neck angles, MJCF range clamp
+    hands.py                12-motor normalized hand command (gmr igris_c_hand_command)
+    retarget_frame.py       FK keybody + velocities (finite difference, LPF) -> contract frame, JSON serialization
+  shaping/                  reference shaping (safety-relevant: the only rate limits before the robot)
+    ramp.py                 JointRamp (smoothstep + rate cap on selected qpos), RateLimiter
+    converge.py             ConvergeGate: Start/Resume/low-level-entry triggers, ramp from LowState, hand rate limit
+    arm_hold.py             ArmHold: per-arm freeze while the bare hand is untracked, debounced release ramp
+  ros/
+    publisher.py            rclpy String publisher (no spin)
+  dds/                      igris_c_sdk side; `from igris_c_teleop import dds` re-exports everything
+    channel.py              lazy SDK import, struct lookup, DdsChannel (ChannelFactory wrapper), topic naming
+    hand_cmd.py             HandCmdDdsPublisher (robot command)
+    ref_state.py            RefStateDdsPublisher (opt-in, headset display only)
+    state_readers.py        LowStateSubscriber, RobotModeSubscriber (ramp inputs, read-only)
+    control_mode.py         ControlModeClient (service requests on a worker thread; robot command)
 tests/                      pytest; consumer_oracle.py = port of the C++ parser
 thirdparty/{gmr, vr_link, igris_c_sdk}   submodules (vr_link is the former vr_link_schema repo, renamed 2026-09;
                             since vr_link 2.1 it ships no SDK and its stream sender is launched from here)

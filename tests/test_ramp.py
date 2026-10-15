@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from igris_c_teleop.ramp import JointRamp, RateLimiter, smoothstep
+from igris_c_teleop.shaping.ramp import JointRamp, RateLimiter, smoothstep
 
 
 def test_smoothstep_shape():

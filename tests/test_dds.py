@@ -1,4 +1,4 @@
-"""igris_c_sdk outputs against a fake binding: channel init, HandCmd order, control-mode worker."""
+"""igris_c_teleop.dds against a fake binding: channel init, HandCmd order, control-mode worker."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 from general_motion_retargeting.hand_retarget import igris_c_hand_command as hand_cmd
 
-from igris_c_teleop import dds_io
-from igris_c_teleop.controller import EVENT_TO_CONTROL_MODE
+from igris_c_teleop import dds as dds_io
+from igris_c_teleop.uplink.controller import EVENT_TO_CONTROL_MODE
 
 
 class _FakeMotorCmd:

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from igris_c_teleop import producer
+from igris_c_teleop.app import producer
 
-PACKAGE_DIR = Path(producer.__file__).resolve().parent
+PACKAGE_DIR = Path(producer.__file__).resolve().parents[1]
 # Nothing from Redis, Isaac, or hit-bench may come back; torch is gmr's business, not ours.
 FORBIDDEN_IMPORT_ROOTS = ("redis", "isaaclab", "isaacsim", "omni", "source", "hit_bench", "_gmr_redis_frame", "torch")
 
@@ -26,10 +26,10 @@ def _import_roots(path: Path) -> set[str]:
 
 
 def test_package_imports_stay_clean():
-    for path in PACKAGE_DIR.glob("*.py"):
+    for path in PACKAGE_DIR.rglob("*.py"):
         offending = _import_roots(path).intersection(FORBIDDEN_IMPORT_ROOTS)
         assert not offending, f"{path.name} imports {sorted(offending)}"
-    assert {"vr_link", "general_motion_retargeting"} <= _import_roots(PACKAGE_DIR / "vrs1_source.py")
+    assert {"vr_link", "general_motion_retargeting"} <= _import_roots(PACKAGE_DIR / "uplink" / "vrs1_source.py")
 
 
 def test_defaults_match_port_plan():
