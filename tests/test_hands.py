@@ -54,6 +54,13 @@ def test_auto_source_arbitrates_per_hand():
     np.testing.assert_allclose(picked[RIGHT], 0.5 * FULL)
     assert hands.active_sources == ("hand", "grip")
 
+    # vr_link 2.1: a tracked controller means "in hand" even when idle (grip 0 -> open), not a hold.
+    idle_held = hands.update(
+        make_state(left_hand=make_hand(z=0.3), right_hand=make_hand(tracked=False), right=ControllerInput(tracked=True))
+    )
+    np.testing.assert_allclose(idle_held[RIGHT], 0.0)
+    assert hands.active_sources == ("hand", "grip")
+
     absent = hands.update(make_state(left=ControllerInput(grip=0.1)))
     assert hands.active_sources == ("grip", "grip")
     np.testing.assert_allclose(absent[LEFT], 0.1 * FULL)

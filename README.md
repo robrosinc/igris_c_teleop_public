@@ -60,11 +60,16 @@ robot bridge are untouched.
 - **Arm hold** (`shaping/arm_hold.py`; `--arm_hold on|off`, default on). With bare hands (no
   controller) the PICO body tracker keeps sending wrist/elbow/shoulder joints after the hand
   leaves the headset's view, and GMR would follow them. When the finger arbiter decides
-  `hold` for a hand (untracked, controller idle) or any of that arm's body joints arrives
-  `valid=false`, the 7 joints of that arm are frozen at the reference of the tick the hold
+  `hold` for a hand (hand untracked, controller neither tracked nor active) or any of that
+  arm's body joints arrives `valid=false`, the 7 joints of that arm are frozen at the reference of the tick the hold
   engaged (so the arm keeps its configuration relative to the torso). Once the hand is tracked
   again for `--arm_hold_release_s 0.2` s, the held pose ramps to the live reference at
-  `--arm_hold_release_rad_s 0.5` (smoothstep 1 s). Per side, independent; fingers already
+  `--arm_hold_release_rad_s 0.5` (smoothstep 1 s). A controller in the hand never holds:
+  the headset reports `ControllerInput.tracked` (vr_link 2.1, from the runtime's controller
+  tracking status) and the arbiter treats a tracked controller as `grip` even when idle, so
+  the arm follows the controller through body tracking. Headsets without the field fall back
+  to "controller input seen", which holds until the first button press (the pre-2.1
+  behaviour). Per side, independent; fingers already
   hold through `HandSourceArbiter`.
 - **Feedback** (`--motion_feedback_dds_topic teleop/motion_feedback`,
   `--no_motion_feedback_dds`): `MotionFeedbackSample(converging, converge_progress,

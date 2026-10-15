@@ -109,8 +109,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--finger_source",
         choices=FINGER_SOURCES,
         default="auto",
-        help="auto (default): per hand, hand-tracking finger curl while tracked, controller grip once controller "
-        "input appears, hold otherwise; hand/grip: force one source; none: no hand command.",
+        help="auto (default): per hand, hand-tracking finger curl while tracked, controller grip while the headset "
+        "reports the controller tracked (in hand) or once controller input appears, hold otherwise; hand/grip: force "
+        "one source; none: no hand command.",
     )
 
     ros = parser.add_argument_group("ROS 2 output (motion reference)")

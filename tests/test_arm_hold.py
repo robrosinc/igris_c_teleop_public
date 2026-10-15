@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
-from vr_link.types import BODY_JOINT_NAMES, TrackedPose
+from general_motion_retargeting.hand_retarget.igris_c_hand_command import HandSourceArbiter
+from vr_link.types import BODY_JOINT_NAMES, ControllerInput, TrackedPose
 
 from igris_c_teleop.shaping.arm_hold import ArmHold, arm_chain_valid, arm_qpos_addresses
 from vr_fixtures import make_hand, make_state
@@ -32,6 +33,15 @@ def test_hold_requested_from_arbiter_or_invalid_chain():
     assert ArmHold.hold_requested(state, "left", "hold") == (True, "hand tracking lost")
     assert ArmHold.hold_requested(state, "right", "hand") == (False, "")
     assert ArmHold.hold_requested(state, "right", "grip") == (False, "")
+    # The arbiter is the single decision point: an idle controller the runtime tracks is
+    # "grip", so the arm follows the controller instead of holding (vr_link 2.1 tracked flag).
+    arbiter = HandSourceArbiter(None)
+    held = make_state(left_hand=make_hand(tracked=False), left=ControllerInput(tracked=True))
+    assert arbiter.decide("left", held.left_hand, held.left_input) == "grip"
+    assert ArmHold.hold_requested(held, "left", "grip") == (False, "")
+    occluded = make_state(left_hand=make_hand(tracked=False))
+    assert arbiter.decide("left", occluded.left_hand, occluded.left_input) == "hold"
+    assert ArmHold.hold_requested(occluded, "left", "hold") == (True, "hand tracking lost")
     broken = _invalidate(state, "Right_Wrist")
     assert not arm_chain_valid(broken, "right") and arm_chain_valid(broken, "left")
     assert ArmHold.hold_requested(broken, "right", "hand") == (True, "arm body joints invalid")
