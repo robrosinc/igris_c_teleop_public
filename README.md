@@ -103,8 +103,7 @@ full, new requests are dropped with a warning.
 ```
 pyproject.toml              pixi env (incl. RoboStack ROS) + tasks + package metadata + pytest config
 scripts/activate_ros.sh     pixi activation hook: PYTHONPATH=thirdparty/gmr only (ROS, source and vr_link are installed in the env)
-scripts/install_sdk_wheel.sh
-scripts/setup.sh            fresh-clone setup: submodules, pixi install, task wheel, install-sdk, check-env
+scripts/setup.sh            fresh-clone setup: submodules (gmr, vr_link), pixi install, check-env
 source/igris_c_teleop/      package installed editable; console commands `igris-c-teleop` (session), `igris-c-gmr` (= python -m igris_c_teleop, producer).
                             Sub-packages follow the data flow (headset -> retarget -> shaping -> outputs); imports only go downstream.
   app/                      entry points
@@ -130,8 +129,9 @@ source/igris_c_teleop/      package installed editable; console commands `igris-
     state_readers.py        LowStateSubscriber, RobotModeSubscriber (ramp inputs, read-only)
     control_mode.py         ControlModeClient (service requests on a worker thread; robot command)
 tests/                      pytest; consumer_oracle.py = port of the C++ parser
-thirdparty/{gmr, vr_link, igris_c_sdk}   submodules (vr_link is the former vr_link_schema repo, renamed 2026-09;
-                            since vr_link 2.1 it ships no SDK and its stream sender is launched from here)
+thirdparty/{gmr, vr_link}   submodules (vr_link is the former vr_link_schema repo, renamed 2026-09;
+                            since vr_link 2.1 it ships no SDK and its stream sender is launched from here).
+                            igris_c_sdk is not a submodule any more (2026-10-16): pixi installs its release wheel.
 ```
 
 ## Environment (pixi)
@@ -152,66 +152,74 @@ single env, `.pixi/envs/default`; the host `/opt/ros` is not used (switched 2026
 - Only **gmr** is exposed through `PYTHONPATH` by the activation hook (its setup.py forces
   smplx/opencv/redis). `PYTHONPATH` is written from scratch, so the login shell's
   `igris_c/install` rosidl `igris_c_sdk` never shadows the pybind binding.
-- The **igris_c_sdk wheel** is built by a human and installed with pip. Its `.so` links the
-  host libssl/libstdc++, but the producer initializes ROS first, so the real process loads
-  the env's libssl/libstdc++ first and the SDK reuses them (verified via `/proc/self/maps`).
-  It is the only SDK checkout: vr_link 2.1 vendors none and its DDS layer imports the
-  wheel from this env.
+- The **igris_c_sdk wheel** is a pypi URL dependency in `pyproject.toml`: the release wheel
+  of `github.com/robrosinc/igris_c_sdk_public` (`dist/`), pinned by release tag (v2.1.1 since
+  2026-10-16; before that a human-built wheel from a `thirdparty/igris_c_sdk` submodule).
+  `pixi install` downloads it; `pixi.lock` records the URL and version but no content hash,
+  so the release tag is the only pin (`git describe`-style immutability is not enforced; a
+  re-tagged release would be picked up silently). The wheel is self-contained
+  (CycloneDDS statically linked); its `.so` links the host libssl/libstdc++, but the producer
+  initializes ROS first, so the real process loads the env's libssl/libstdc++ first and the
+  SDK reuses them (verified via `/proc/self/maps`). No SDK source is checked out here:
+  vr_link 2.1 vendors none and its DDS layer imports the wheel from this env.
 - **vr-link-stream deps**: conda `av`, `opencv`, `pyyaml` (vr_link's `video` and
   `calibration` features, same bounds) are in this env because `pixi run teleop` starts
   vr_link's VRL2 sender here.
 
 ```bash
-# Fresh clone in one go: submodules + pixi install + task wheel + install-sdk + check-env
-# (plain shell with the host ROS 2 Jazzy sourced; refuses to run under pixi run/shell)
+# Fresh clone in one go: submodules + pixi install + check-env
 scripts/setup.sh
 
 # Or step by step
 git submodule update --init --recursive
-pixi install
-
-# igris_c_sdk Python binding wheel (Python 3.12, human-built)
-(cd thirdparty/igris_c_sdk && task wheel)     # -> dist/igris_c_sdk-*.whl
-pixi run install-sdk
+pixi install            # conda + PyPI deps incl. the igris_c_sdk release wheel (tag-pinned URL)
 
 pixi run check-env      # igris_c_sdk and rclpy paths both under .pixi/envs, prints True
 pixi run test           # unit / contract tests
 pixi run test-ros       # real rclpy round trip
 ```
 
+**Updating the SDK wheel**: pick the release tag in `igris_c_sdk_public` (its release commit
+message names the internal `igris_c_sdk` commit it was built from), change the tag and the
+wheel filename together in the `igris_c_sdk` URL of `pyproject.toml`, run `pixi install`,
+then `check-env`, `test`, and steps 1, 6 and 7 of the verification procedure below before the
+wheel talks to a robot.
+
 `pixi run --clean-env ...` drops all host environment variables but also host commands such
 as `bash` and `ldd`, so use it only for Python tasks (`teleop`, `replay`).
 
 **Setup troubleshooting (observed on the first install, 2026-09-18)**
 
-- `task wheel` fails with `No download info given for 'cyclonedds'`: the nested igris_c_sdk
-  submodules (cyclonedds, cyclonedds-cxx, pybind11) are empty. Run
-  `git submodule update --init --recursive` from the root.
 - `pixi run check-env` reports `No module named 'imageio'`: importing the gmr package goes
   through the viewer module. It is in `pyproject.toml` pypi-dependencies, so re-run
   `pixi install`.
 - pytest dies with a `launch_testing` plugin error: ROS pytest plugins are autoloading. The
   `pixi run test` / `test-ros` tasks already set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
-- Re-running `pixi install` keeps the pip-installed SDK wheel (it survived the env re-solve
-  for the RoboStack switch on 2026-09-21).
 - The editable install creates `source/igris_c_teleop.egg-info/`. It is in `.gitignore`.
 - The repository and package were renamed `igris_c_gmr` -> `igris_c_teleop` (2026-10-15).
   Existing clones: `git remote set-url origin git@bitbucket.org:robrosinc/igris_c_teleop.git`,
   then `pixi install` to refresh the editable install and remove `source/igris_c_gmr.egg-info/`.
 
-**Binding pitfall**: an old build's `.so` registered the DDS type name as
-`igris_c_sdk::msg::dds_::HandCmd_`, silently mismatching the robot bridge
-(`igris_c::msg::dds::HandCmd`). Always rebuild and install from the submodule pin, and check
-that `strings <so> | grep -o 'igris_c.*::HandCmd'` contains no `dds_`.
+**Binding pitfall**: the DDS type name of the binding must match the bridge exactly, and a
+mismatch is silent. The current bridge (`igris_c_bridge/src/dds/dds_manager.cpp`, igris_c
+workspace bed8554, read 2026-10-16) subscribes to `igris_c_sdk::msg::dds_::HandCmd_` on the
+bare `handcmd` topic; the v2.1.1 wheel registers that same name (its IDL is identical to the
+earlier 6b40103 pin). An earlier version of this paragraph demanded that
+`strings <so> | grep -o 'igris_c.*::HandCmd'` contain no `dds_`; that criterion contradicts
+the current bridge source and was dropped on 2026-10-16 (human re-check requested). Always
+install the tag-pinned release wheel from `pyproject.toml` (`pixi install`) and compare the
+name printed by `strings <so> | grep -o 'igris_c_sdk::msg::dds_::HandCmd_'` with the bridge
+build that the robot NUC actually runs.
 If `pixi run check-env` prints "SHADOWED by rosidl package", the igris_c overlay is still on
 PYTHONPATH.
 
 **Service topic prefix pitfall (observed 2026-09-18)**: the `IgrisC_Client` of the
 2026-09-15 wheel left in `igris_c_teleop_env` (built from igris_c 2ba902e) writes requests to
-`rt/service/control_mode/request`. The submodule pin (6b40103) and the current igris_c bridge
-(`dds_manager.cpp`) use `service/control_mode/request`. With the old wheel, button requests
-never reach the bridge and the failure is silent (timeout only). The producer logs the loaded
-SDK version and path at startup; confirm it is the wheel built from the submodule. The
+`rt/service/control_mode/request`. The pinned release wheel (v2.1.1, like the earlier
+submodule pin 6b40103) and the current igris_c bridge (`dds_manager.cpp`) use
+`service/control_mode/request`. With the old wheel, button requests never reach the bridge
+and the failure is silent (timeout only). The producer logs the loaded SDK version and path at
+startup; confirm the version is the pinned release and the path is under `.pixi/envs`. The
 `handcmd` topic of `HandCmd` is the same in both versions.
 
 ## Start order (robot NUC)
@@ -247,7 +255,9 @@ publishing resumes on reconnect.
 Main options: `--no_dds` (ROS only, no hand/button output), `--replay_vrs1 <file>` (replay a
 recording without a headset), `--finger_source auto|hand|grip|none`,
 `--dds_topic_naming native|ros_compatible` (must match the robot's
-`igris_c.network.dds_topic_naming`), `--hand_dds_topic handcmd`, `--no_mode_events`,
+`igris_c.network.transport`: `cyclonedds_native` pairs with `native`,
+`cyclonedds_ros_compatible` with `ros_compatible`; SDK v2.1.1 replaced the earlier
+`igris_c.network.dds_topic_naming` key), `--hand_dds_topic handcmd`, `--no_mode_events`,
 `--ros_domain_id 91`, `--invert_neck_yaw/--invert_neck_pitch`,
 `--ref_dds_topic gmr/refstate` (also publish the 31 retargeted joints as `MasterArmState`;
 input for the hand-target overlay of vr_system `ARobotTeleopPawn`. Not published unless
@@ -321,9 +331,12 @@ producer behavior (reference jumps; arms follow the body tracker); the hit-bench
 
 ## Open items (human confirmation)
 
-- igris_c bridge/SDK version and topic naming on the robot NUC. The wire of submodule pin
-  `igris_c_sdk@6b40103` and `igris_c` workspace `78bec2c` is identical (the only difference is
-  one test snapshot).
-- Confirm once that `pixi install` keeps the pip-installed SDK wheel.
+- igris_c bridge/SDK version and topic naming on the robot NUC. The wire of the earlier
+  submodule pin `igris_c_sdk@6b40103` and `igris_c` workspace `78bec2c` was identical (the only
+  difference is one test snapshot). The release wheel v2.1.1 used since 2026-10-16 is built
+  from internal `igris_c_sdk` 8bc8c7b; between 78bec2c and that commit only
+  `include/igris_c_sdk/namespace_resolver.hpp` (25 lines) and the release-prep commit differ,
+  msg/srv/idl are unchanged. The `namespace_resolver.hpp` change still needs a human read
+  (topic name resolution) before the wheel talks to a robot.
 - The finger normalization -> joint angle mapping is a linear placeholder (gmr
   `igris_c_hand_command`); hardware bend ratios not yet measured.

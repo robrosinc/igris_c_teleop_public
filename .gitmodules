@@ -5,6 +5,3 @@
 [submodule "thirdparty/vr_link"]
 	path = thirdparty/vr_link
 	url = git@bitbucket.org:robrosinc/vr_link.git
-[submodule "thirdparty/igris_c_sdk"]
-	path = thirdparty/igris_c_sdk
-	url = git@bitbucket.org:robrosinc/igris_c_sdk.git

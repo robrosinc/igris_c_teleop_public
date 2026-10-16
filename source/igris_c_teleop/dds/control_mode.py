@@ -16,10 +16,10 @@ from .channel import DdsChannel
 
 logger = logging.getLogger("igris_c_teleop.dds")
 
-# Bare service topic the SDK's IgrisC_Client publishes on (thirdparty/igris_c_sdk src/igris_c_client.cpp),
-# matching igris_c_bridge dds_manager.cpp. Only informational here: the client owns the real name, and a
-# wheel built from an older SDK (e.g. the 2026-09-15 build) still uses "rt/service/..." and will not reach
-# the current bridge. Rebuild the wheel from the submodule pin.
+# Bare service topic the SDK's IgrisC_Client publishes on (igris_c_sdk src/igris_c_client.cpp), matching
+# igris_c_bridge dds_manager.cpp. Only informational here: the client owns the real name, and a wheel built
+# from an older SDK (e.g. the 2026-09-15 build) still uses "rt/service/..." and will not reach the current
+# bridge. Install the tag-pinned release wheel from pyproject.toml (`pixi install`).
 CONTROL_MODE_REQUEST_TOPIC = "service/control_mode/request"
 
 

@@ -400,6 +400,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/5a/3d/589663aeeacd59bb2f3e8596bfd3e81cf0fb18d70bb433199041f469771b/etils-1.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/69/84/1b98671314ea5f40397586b6cd14db913de3196333be558fdc177e61708f/glfw-2.10.2-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: direct+https://github.com/robrosinc/igris_c_sdk_public/raw/v2.1.1/dist/igris_c_sdk-2.1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3e/2d/ca050652104bab2cf55e569db2a178b1b61cb041fef28307f2db383f6d9f/imageio-2.37.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e2/6d/d56be57340baf2e6f6361386f4c21b8b5e001251c64af954787f8d01ec78/loop_rate_limiters-1.2.0-py3-none-any.whl
@@ -410,6 +411,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/de/e4/1ba6f44e491c4eece978685230dde56b14d51a0365bc1b774ddaa94d14cd/pyopengl-3.1.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2f/d0/f234961cb3ffbe381c3d82cd9c40fc7e67200c9f6b62a0f60235e74134b3/qpsolvers-4.13.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5c/6f/86ee925f5e20df3aa366538a56e0d1bd5dfa9ef9d9bea57709480d47d72c/uv-0.5.21-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: ./
       - pypi: ./thirdparty/vr_link
 packages:
@@ -1197,10 +1199,16 @@ packages:
   purls: []
   size: 14459115
   timestamp: 1786545741408
+- pypi: direct+https://github.com/robrosinc/igris_c_sdk_public/raw/v2.1.1/dist/igris_c_sdk-2.1.1-py3-none-any.whl
+  name: igris-c-sdk
+  version: 2.1.1
+  requires_dist:
+  - uv==0.5.21
+  requires_python: ==3.12.*
 - pypi: ./
   name: igris-c-teleop
   version: 0.1.0
-  sha256: ab07203246753e4a6584766ddbaa29eb19ff11dd7e54dd306a93e0dd82f110d9
+  sha256: 0a1d2376911f24bfe876a3b60f5dc64da868ed30f1256eaf23d96d996704708c
   requires_python: ==3.12.*
 - pypi: https://files.pythonhosted.org/packages/3e/2d/ca050652104bab2cf55e569db2a178b1b61cb041fef28307f2db383f6d9f/imageio-2.37.4-py3-none-any.whl
   name: imageio
@@ -6264,6 +6272,11 @@ packages:
   purls: []
   size: 748418
   timestamp: 1779015692186
+- pypi: https://files.pythonhosted.org/packages/5c/6f/86ee925f5e20df3aa366538a56e0d1bd5dfa9ef9d9bea57709480d47d72c/uv-0.5.21-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: uv
+  version: 0.5.21
+  sha256: 2a1582f4964b1249b0e82ad0e60519a73392e099541a6db587e7333139255d50
+  requires_python: '>=3.8'
 - pypi: ./thirdparty/vr_link
   name: vr-link
   version: 2.1.0

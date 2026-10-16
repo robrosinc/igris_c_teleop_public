@@ -1,8 +1,8 @@
 """igris_c_sdk (CycloneDDS) channel: lazy SDK import, struct lookup, the process-wide
 ``ChannelFactory`` wrapper and the topic-naming contract.
 
-The SDK binding is a Python 3.12 wheel (``task wheel`` in ``thirdparty/igris_c_sdk``);
-it is imported lazily so the producer can run ROS-only with ``--no_dds`` in an
+The SDK binding is a Python 3.12 wheel (release wheel of ``igris_c_sdk_public``, a pypi
+URL dependency in ``pyproject.toml``); it is imported lazily so the producer can run ROS-only with ``--no_dds`` in an
 environment without it. Publishers, readers and the control-mode client live in the
 sibling modules of this package; the ordering constraints below bind all of them.
 
@@ -23,7 +23,10 @@ logger = logging.getLogger("igris_c_teleop.dds")
 
 BODY_JOINT_COUNT = 31  # MJCF hinge order == igris_c_sdk 31-motor order (robros_igris_c_v2)
 TOPIC_NAMINGS = ("native", "ros_compatible")
-NO_DDS_HINT = "Run with --no_dds for a ROS-only session, or install the igris_c_sdk Python 3.12 wheel (task wheel in thirdparty/igris_c_sdk, then pixi run install-sdk)."
+NO_DDS_HINT = (
+    "Run with --no_dds for a ROS-only session, or install the igris_c_sdk Python 3.12 wheel "
+    "(pixi install; it is the igris_c_sdk pypi URL dependency in pyproject.toml)."
+)
 
 
 def import_sdk():
