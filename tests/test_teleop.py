@@ -61,6 +61,15 @@ def test_shared_dds_settings_and_producer_passthrough():
     assert producer.argv[producer.argv.index("--dds_domain_id") + 1] == "7"
     assert producer.argv[-3:] == ["--measure_fps", "--finger_source", "grip"]
     assert "--measure_fps" not in stream.argv and "--finger_source" not in stream.argv
+    assert "--head-rgb" not in stream.argv  # unset: the config file's head_rgb.enable applies
+
+
+def test_head_rgb_is_forwarded_to_the_sender():
+    stream, producer = _commands(*NS, "--target", "isaac", "--head_rgb", "on")
+    assert stream.argv[stream.argv.index("--head-rgb") + 1] == "on"
+    assert "--head_rgb" not in producer.argv and "--head-rgb" not in producer.argv
+    stream, _ = _commands(*NS, "--head_rgb", "off")
+    assert stream.argv[stream.argv.index("--head-rgb") + 1] == "off"
 
 
 def test_no_stream_gives_producer_only():

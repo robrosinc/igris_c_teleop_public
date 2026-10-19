@@ -241,6 +241,10 @@ startup; confirm the version is the pinned release and the path is under `.pixi/
    to the producer; `--no_stream` equals `producer`;
    `--dry_run` prints both command lines. A non-native `--dds_topic_naming` needs
    `--stream_config` (the sender reads `dds.topic_naming` from its file only).
+   `--head_rgb on|off` forwards vr_link's `--head-rgb`: the second video stream of the
+   head colour camera (`VideoFrame.stream_id = HeadRgb`, vr_link 2.2) on top of the
+   packaged config's `head_rgb.enable` (off); only for headsets running a vr_system
+   build that demultiplexes `stream_id`.
    Before 2026-10-15 `pixi run teleop` meant the producer alone; that is `producer` now.
    Put the headset in Active and confirm `VR skeleton connected` in the log.
 3. `ros2 run igris_c_inference_public igris_c_inference_node --config <policy>/params.yaml`

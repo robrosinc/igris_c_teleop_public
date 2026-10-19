@@ -99,6 +99,12 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         "--stream_encoder", type=str, default=None, help="vr-link-stream --encoder override (libx264, h264_nvenc, ...)."
     )
     stream.add_argument("--stream_max_fps", type=float, default=None, help="vr-link-stream --max-fps.")
+    stream.add_argument(
+        "--head_rgb", choices=("on", "off"), default=None,
+        help="vr-link-stream --head-rgb: the second video stream (head colour camera, VideoFrame.stream_id = "
+        "HeadRgb) on top of the config file's head_rgb.enable (packaged configs: off). Needs a headset build "
+        "that demultiplexes stream_id.",
+    )
     stream.add_argument("--no_stream", action="store_true", help="Producer only (same as pixi run producer).")
 
     parser.add_argument(
@@ -140,6 +146,8 @@ def build_commands(args: argparse.Namespace, producer_args: Sequence[str]) -> li
             stream_argv += ["--encoder", args.stream_encoder]
         if args.stream_max_fps:
             stream_argv += ["--max-fps", str(args.stream_max_fps)]
+        if args.head_rgb:
+            stream_argv += ["--head-rgb", args.head_rgb]
         commands.append(ChildCommand("vr-link-stream", stream_argv))
 
     producer_argv = [
