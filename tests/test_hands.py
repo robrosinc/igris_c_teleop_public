@@ -7,25 +7,27 @@ import pytest
 from general_motion_retargeting.hand_retarget import igris_c_hand_command as hand_cmd
 from vr_link.types import ControllerInput
 
-from igris_c_teleop.retarget.hands import HandTargets
+from igris_c_teleop.retarget.hands import GRIP_FULL_COMMAND, HandTargets
 from vr_fixtures import curl_from_tip_z, make_hand, make_state
 
 RIGHT = hand_cmd.RIGHT_MOTOR_SLOTS
 LEFT = hand_cmd.LEFT_MOTOR_SLOTS
-FULL = hand_cmd.GRIP_FULL_COMMAND  # 0.6 at a fully squeezed grip
+FULL = GRIP_FULL_COMMAND  # 1.0 at a fully squeezed grip (gmr's own cap of 0.6 is rescaled away)
 
 
 def test_grip_hand_targets_fill_the_flexion_motors():
+    assert FULL == 1.0
     hands = HandTargets("grip")
     assert hands.enabled and hands.tracked == (False, False) and hands.motor_ids == hand_cmd.MOTOR_IDS
     command = hands.update(make_state(left=ControllerInput(grip=0.25), right=ControllerInput(grip=1.0)))
     assert command.shape == (12,)
-    np.testing.assert_allclose(command, hand_cmd.grip_to_normalized(0.25, 1.0))
+    np.testing.assert_allclose(command, hand_cmd.grip_to_normalized(0.25, 1.0, full_command=FULL))
     np.testing.assert_allclose(command[RIGHT], FULL)
     np.testing.assert_allclose(command[LEFT], 0.25 * FULL)
     assert hands.active_sources == ("grip", "grip")
     clamped = hands.update(make_state(left=ControllerInput(grip=-1.0), right=ControllerInput(grip=2.0)))
-    np.testing.assert_allclose(clamped, hand_cmd.grip_to_normalized(0.0, 1.0))
+    np.testing.assert_allclose(clamped, hand_cmd.grip_to_normalized(0.0, 1.0, full_command=FULL))
+    assert clamped.max() <= 1.0
     forced = hands.update(make_state(left_hand=make_hand(z=0.9), right_hand=make_hand(z=0.9), right=ControllerInput(grip=0.5)))
     np.testing.assert_allclose(forced[RIGHT], 0.5 * FULL)
     assert hands.tracked == (False, False)
@@ -34,6 +36,23 @@ def test_grip_hand_targets_fill_the_flexion_motors():
     assert not none.enabled and none.update(make_state()) is None and none.active_sources == ("hold", "hold")
     with pytest.raises(ValueError):
         HandTargets("fist")
+
+
+def test_grip_full_command_is_configurable_and_bounded():
+    # gmr's own cap reproduces the pre-rescale behaviour.
+    legacy = HandTargets("grip", grip_full_command=hand_cmd.GRIP_FULL_COMMAND)
+    command = legacy.update(make_state(left=ControllerInput(grip=0.5), right=ControllerInput(grip=1.0)))
+    np.testing.assert_allclose(command, hand_cmd.grip_to_normalized(0.5, 1.0))
+    np.testing.assert_allclose(command[RIGHT], hand_cmd.GRIP_FULL_COMMAND)
+
+    partial = HandTargets("grip", grip_full_command=0.8)
+    command = partial.update(make_state(left=ControllerInput(grip=1.0), right=ControllerInput(grip=0.5)))
+    np.testing.assert_allclose(command[LEFT], 0.8)
+    np.testing.assert_allclose(command[RIGHT], 0.4)
+
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            HandTargets("grip", grip_full_command=bad)
 
 
 def test_auto_source_arbitrates_per_hand():

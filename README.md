@@ -344,3 +344,7 @@ producer behavior (reference jumps; arms follow the body tracker); the hit-bench
   (topic name resolution) before the wheel talks to a robot.
 - The finger normalization -> joint angle mapping is a linear placeholder (gmr
   `igris_c_hand_command`); hardware bend ratios not yet measured.
+- Controller grip -> `handcmd` is linear over the full 0..1 range since 2026-10-21
+  (`retarget/hands.py` rescales away gmr's internal `GRIP_FULL_COMMAND` cap of 0.6; grip 0.5
+  publishes 0.5). Hand tracking was always 0..1. The physical hand at command 1.0 from a full
+  grip squeeze has not been validated yet.
