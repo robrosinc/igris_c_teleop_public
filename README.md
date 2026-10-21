@@ -28,7 +28,9 @@ headset (vr_system, VRS1 FlatBuffers over TCP -> this host :9102)
   -> HandTargets -> HandCmdDdsPublisher     DDS <ns>/handcmd  (12 normalized motors, 100 Hz)
   -> ControllerEvents -> ControlModeClient  DDS <ns>/service/control_mode/request
   -> RefStateDdsPublisher (opt-in)          DDS <ns>/gmr/refstate  (31 retargeted joints, MasterArmState type, 100 Hz,
-                                            display-only for the headset hand overlay - the robot bridge does not subscribe)
+                                            display-only - the robot bridge does not subscribe. Since 2026-10-21 the packaged
+                                            vr_link stream configs feed the headset overlay's body_reference from the inference
+                                            node's lowcmd instead; refstate is only read with robot_state.reference_topic: refstate)
   -> ControllerStatePublisher (vr_link)     DDS <ns>/vr/controller  (headset UI record-toggle counter, session id, 14 controller
                                             axes; Joy_ type, 100 Hz, only while the skeleton is connected. Input for episode
                                             recorders (hit-tasks Isaac bridge etc.) only - the robot bridge does not subscribe)
@@ -48,9 +50,11 @@ robot bridge are untouched.
   Resume with the operator away from the robot's current pose would command a jump. The
   gate subscribes to DDS `lowstate` (31 joint positions) and `robotstate` (control mode)
   and, on a trigger, replaces the 31 hinge joints of the reference with a smoothstep blend
-  from the LowState pose to the live reference (`--converge_seconds 2.0`), with a per-joint
-  rate cap (`--converge_max_rad_s 0.5`) that extends the ramp when the distance is large;
-  the root pose is never touched. The hand command is rate-limited meanwhile
+  from the LowState pose to the live reference (`--converge_seconds 1.0`, the soft start),
+  with a per-joint rate cap (`--converge_max_rad_s 0.5`) that extends the ramp when the
+  distance is large; the root pose is never touched. The ramp ends as soon as every joint is
+  within 0.02 rad of the live reference (since 2026-10-21; a reference already next to the
+  robot releases at once, a large gap takes about distance / cap). The hand command is rate-limited meanwhile
   (`--converge_hand_rate 1.0`/s). Triggers: VRS1 `teleop_state` entering `Resuming`
   (vr_system Start and Resume), the robot mode entering the low-level family
   (`ROBOT_STATE_LOW` / `ROBOT_STATE_WALK_LOW`, read from the SDK binding) from a known other
@@ -74,8 +78,12 @@ robot bridge are untouched.
 - **Feedback** (`--motion_feedback_dds_topic teleop/motion_feedback`,
   `--no_motion_feedback_dds`): `MotionFeedbackSample(converging, converge_progress,
   arm_hold_left, arm_hold_right)` every tick while connected. `vr-link-stream` folds it into
-  the VRL2 `Signals` record; the headset HUD shows `CONVERGING xx%` (pill, popup ring) and an
+  the VRL2 `Signals` record; the headset HUD shows a converging indicator while the flag is
+  set and removes it (back to the normal teleop-state display) when it clears, plus an
   arm-hold toast, also in NO CAMERA mode (the sender heartbeats `Signals` without video).
+  `converge_progress` is deprecated since 2026-10-21 (the ramp has no fixed duration, so a
+  time-based percentage means nothing): the producer sends 0 and `vr-link-stream` forwards 0;
+  a headset build that still renders `CONVERGING xx%` shows 0% until it is updated.
 
 The ROS topic carries **only the whole-body motion frame**. Keys: `fps, root_pos,
 root_rot(wxyz), root_vel, root_angvel, dof_pos, dof_vel (MJCF order, 31), keybody_pos_local,
@@ -264,8 +272,11 @@ recording without a headset), `--finger_source auto|hand|grip|none`,
 `igris_c.network.dds_topic_naming` key), `--hand_dds_topic handcmd`, `--no_mode_events`,
 `--ros_domain_id 91`, `--invert_neck_yaw/--invert_neck_pitch`,
 `--ref_dds_topic gmr/refstate` (also publish the 31 retargeted joints as `MasterArmState`;
-input for the hand-target overlay of vr_system `ARobotTeleopPawn`. Not published unless
-given. Contract: vr_system `docs/Arm_Impedance_Overlay_Plan.md`),
+input for the hand-target overlay of vr_system `ARobotTeleopPawn` only when the vr_link
+stream config says `robot_state.reference_topic: refstate`. Every packaged stream config
+uses `reference_topic: lowcmd` since 2026-10-21, i.e. the inference node's final command,
+so this option is not needed for the overlay unless that config is overridden. Not published
+unless given. Contract: vr_system `docs/Arm_Impedance_Overlay_Plan.md`),
 `--controller_dds_topic vr/controller` / `--no_controller_dds` (headset controller relay:
 re-publishes the VRS1 `record_toggle_count` together with a `session_id` and the controller
 axes as `Joy_`. On by default. Layout and publisher class are owned by vr_link
@@ -315,14 +326,17 @@ prefix), match it with `--hand_dds_topic rt/handcmd`.
 10. Convergence ramp (simulation first, then torque ON only with approval and a safe
     posture, hands clear). Headset in Paused with the operator's arms far from the robot's,
     then Resume: the log shows `convergence ramp started (teleop_state RESUMING ...)`, the
-    `--measure_fps` line shows `converge ACTIVE xx%` reaching `idle` after ~2 s (longer when
-    the 0.5 rad/s cap binds); the robot moves smoothly, no jump, `ros2 topic echo` of
-    `dof_pos` shows a monotone blend. Same when the robot enters low-level control while the
-    headset is Active (`robot entered low-level control` trigger). With the producer started
-    before the robot bridge (no LowState), the trigger is logged as skipped and the reference
-    jumps as before. Headset HUD: pill `CONVERGING xx%` in cyan and the center ring; in NO
-    CAMERA mode as well. Pass: no visible jump at Start/Resume/low-level entry; the ramp
-    ends within `converge_seconds` + distance / cap.
+    `--measure_fps` line shows `converge ACTIVE (blend xx%, residual x.xxx rad)` reaching
+    `idle` and the log `convergence ramp finished after x.xx s`; the robot moves smoothly,
+    no jump, `ros2 topic echo` of `dof_pos` shows a monotone blend. Same when the robot
+    enters low-level control while the headset is Active (`robot entered low-level control`
+    trigger). With the producer started before the robot bridge (no LowState), the trigger
+    is logged as skipped and the reference jumps as before. Headset HUD: the converging
+    indicator (cyan pill and center ring on current builds, showing 0% until the headset
+    drops the percentage) while the flag is set, gone when it clears; in NO CAMERA mode as
+    well. Pass: no visible jump at Start/Resume/low-level entry; the ramp ends within about
+    `max(converge_seconds, distance / cap)`, and at once (under 0.1 s) when the operator is
+    already at the robot's pose; the indicator disappears together with the `finished` log.
 11. Arm hold (bare hands, torque OFF first). Cover one hand: the log shows `left arm HELD`,
     the HUD toast names the arm, the robot arm stays still while the torso and the other arm
     follow. Uncover: after 0.2 s `released`, the arm ramps back at <= 0.5 rad/s, toast gone.

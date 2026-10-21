@@ -24,6 +24,29 @@ def test_ramp_starts_at_start_and_ends_on_the_live_reference():
     assert qpos[0] == 9.0 and qpos[1] == 9.0  # untouched joints
 
 
+def test_ramp_settles_as_soon_as_the_output_is_on_the_live_reference():
+    # A gap inside the settle tolerance is done on the first tick, not after duration_s.
+    ramp = JointRamp([0], [1.0], duration_s=1.0, max_rate=0.5, now=0.0, settle_tol=0.02)
+    qpos = np.array([1.01])
+    assert ramp.apply(qpos, 0.0) == 1.0 and ramp.done and qpos[0] == 1.0
+    # A small gap settles once the smoothstep target is within tolerance, well before 1 s.
+    ramp = JointRamp([0], [0.0], duration_s=1.0, max_rate=0.5, now=0.0, settle_tol=0.02)
+    t = 0.0
+    while not ramp.done and t < 2.0:
+        t += 0.01
+        qpos[0] = 0.1
+        ramp.apply(qpos, t)
+    assert ramp.done and 0.3 < t < 0.9 and abs(qpos[0] - 0.1) <= 0.02
+    # A large gap is bounded by the rate cap and ends after the blend clock.
+    ramp = JointRamp([0], [0.0], duration_s=1.0, max_rate=0.5, now=0.0, settle_tol=0.02)
+    t = 0.0
+    while not ramp.done and t < 10.0:
+        t += 0.01
+        qpos[0] = 1.5
+        ramp.apply(qpos, t)
+    assert ramp.done and 2.9 < t < 3.1  # ~1.5 rad at 0.5 rad/s
+
+
 def test_ramp_rate_cap_bounds_every_step_and_delays_settle():
     ramp = JointRamp([0], [0.0], duration_s=0.0, max_rate=0.5, now=0.0)  # no blend: pure rate limit
     qpos = np.array([2.0])

@@ -8,7 +8,10 @@ hinge joints of the retargeted ``qpos`` with a :class:`~.ramp.JointRamp` from
 the latest ``LowState`` toward the live reference; everything downstream (FK
 keybodies, finite-difference velocities, refstate overlay) is computed from
 the ramped ``qpos``, so the inference node sees one consistent, slowly moving
-reference. The root pose (``qpos[:7]``) is never touched.
+reference. The root pose (``qpos[:7]``) is never touched. The ramp ends as
+soon as every hinge is within ``settle_tol`` of the live reference (a
+reference already next to the robot releases at once); ``duration_s`` only
+shapes the soft start and ``max_rate`` bounds the speed of a large gap.
 
 Triggers (each starts, or restarts, the ramp):
 
@@ -61,9 +64,10 @@ def low_level_modes_from_sdk(sdk) -> frozenset[int]:
 @dataclass(frozen=True)
 class ConvergeStatus:
     converging: bool
-    progress: float  # 0..1 while converging, 1.0 when idle
+    progress: float  # smoothstep blend fraction 0..1 while converging, 1.0 when idle (informational only)
     trigger: str | None = None  # set on the tick a ramp started (log/feedback)
     skipped: str | None = None  # set when a trigger could not start (no fresh LowState)
+    residual: float = 0.0  # max |ramp output - live reference| in rad while converging, 0.0 when idle
 
 
 class ConvergeGate:
@@ -71,7 +75,7 @@ class ConvergeGate:
         self,
         hinge_indices,
         *,
-        duration_s: float = 2.0,
+        duration_s: float = 1.0,
         max_rate: float = 0.5,
         hand_rate: float = 1.0,
         lowstate_max_age_s: float = 0.5,
@@ -165,10 +169,10 @@ class ConvergeGate:
             return ConvergeStatus(False, 1.0, trigger, skipped)
         progress = self._ramp.apply(qpos, now)
         if self._ramp.done:
-            logger.warning("convergence ramp finished (residual %.3f rad)", self._ramp.residual)
+            logger.warning("convergence ramp finished after %.2f s (residual %.3f rad)", now - self._ramp._t0, self._ramp.residual)
             self._ramp = None
             return ConvergeStatus(False, 1.0, trigger, skipped)
-        return ConvergeStatus(True, progress, trigger, skipped)
+        return ConvergeStatus(True, progress, trigger, skipped, residual=self._ramp.residual)
 
     def shape_hand(self, command: np.ndarray | None, now: float) -> np.ndarray | None:
         """Rate-limit the 12-motor hand command while the ramp is active; pass through otherwise."""

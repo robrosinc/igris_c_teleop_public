@@ -50,6 +50,21 @@ def test_resuming_starts_a_ramp_from_lowstate_and_converges():
     assert gate.started == 2
 
 
+def test_ramp_releases_at_once_when_the_operator_is_already_at_the_robot():
+    gate = _gate(duration_s=1.0, max_rate=0.5)
+    qpos = _qpos(1.01)
+    status = _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=(np.full(31, 1.0), 0.0))
+    assert status.trigger == TRIGGER_RESUME and not status.converging and status.progress == 1.0
+    assert gate.started == 1 and not gate.active and np.allclose(qpos[HINGES], 1.0)
+    # The residual is reported while the ramp runs and the default blend time is 1 s.
+    gate = ConvergeGate(HINGES, max_rate=0.0)
+    assert gate.duration_s == 1.0
+    status = _tick(gate, _qpos(2.0), 0.0, state=TeleopState.RESUMING, lowstate=(np.zeros(31), 0.0))
+    assert status.converging and status.residual == 2.0
+    status = _tick(gate, _qpos(2.0), 0.5, state=TeleopState.RESUMING, lowstate=(np.zeros(31), 0.0))
+    assert status.converging and status.residual == 1.0 and status.progress == 0.5
+
+
 def test_legacy_headset_triggers_on_connection_edge_only_when_state_is_unknown():
     gate = _gate()
     lowstate = (np.zeros(31), 0.0)

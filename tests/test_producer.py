@@ -69,8 +69,8 @@ def test_reference_shaping_defaults():
     from vr_link.messages import teleop_dds
 
     args = producer.parse_args([])
-    # Convergence ramp: on by default, 2 s smoothstep from LowState, 0.5 rad/s cap, hand 1.0/s.
-    assert not args.no_converge and args.converge_seconds == 2.0 and args.converge_max_rad_s == 0.5
+    # Convergence ramp: on by default, 1 s smoothstep soft start from LowState (2026-10-21, was 2 s), 0.5 rad/s cap, hand 1.0/s.
+    assert not args.no_converge and args.converge_seconds == 1.0 and args.converge_max_rad_s == 0.5
     assert args.converge_hand_rate == 1.0 and args.lowstate_max_age == 0.5
     assert args.lowstate_dds_topic == "lowstate" and args.robotstate_dds_topic == "robotstate"
     # Arm hold on bare-hand tracking loss: on by default, 0.2 s re-acquire, 0.5 rad/s release.

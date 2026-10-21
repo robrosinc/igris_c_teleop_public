@@ -7,6 +7,12 @@ over ``duration_s``, then a per-joint rate cap so the output never moves
 faster than ``max_rate`` even when the live reference jumps. The live
 reference keeps moving during the ramp, so the ramp ends exactly on it.
 
+The ramp is done as soon as every joint is within ``settle_tol`` of the live
+reference (since 2026-10-21; before, it also waited for ``s`` to reach 1, so
+a reference already next to the robot still took the full ``duration_s``).
+``duration_s`` therefore only shapes the soft start: a small gap settles
+early, a large one is bounded by ``max_rate`` and ends after the blend.
+
 ``RateLimiter`` is the scalar-vector form used for the normalized hand command.
 """
 
@@ -54,7 +60,12 @@ class JointRamp:
         return self._out.copy()
 
     def apply(self, qpos: np.ndarray, now: float) -> float:
-        """Overwrite ``qpos[indices]`` with the ramped values; return the progress in [0, 1]."""
+        """Overwrite ``qpos[indices]`` with the ramped values; return the blend fraction ``s`` in [0, 1].
+
+        ``progress`` is the smoothstep fraction (informational: it says how far the
+        blend target has moved, not whether the output has settled). ``done`` is
+        the settle test against the live reference.
+        """
 
         now = float(now)
         dt = min(self.max_dt, max(0.0, now - self._last))
@@ -70,7 +81,8 @@ class JointRamp:
         self._out = self._out + step
         qpos[self.indices] = self._out
         self.residual = float(np.max(np.abs(self._out - live))) if self._out.size else 0.0
-        if s >= 1.0 and self.residual <= self.settle_tol:
+        # Settled on the live reference: done regardless of the blend clock.
+        if self.residual <= self.settle_tol:
             self.done = True
             self.progress = 1.0
         else:

@@ -18,9 +18,10 @@ Pipeline::
       -> ControllerStatePublisher (vr_link, --no_controller_dds)    <ns>/vr/controller (DDS Joy_: headset-UI recording
                                                                     toggle counter, session id, controller axes; read by
                                                                     episode recorders such as the hit-tasks Isaac bridge)
-      -> MotionFeedbackPublisher (vr_link, --no_motion_feedback_dds) <ns>/teleop/motion_feedback (DDS Joy_: converging +
-                                                                    progress, per-arm hold; vr-link-stream puts it into
-                                                                    Signals for the headset HUD)
+      -> MotionFeedbackPublisher (vr_link, --no_motion_feedback_dds) <ns>/teleop/motion_feedback (DDS Joy_: converging
+                                                                    flag, per-arm hold; vr-link-stream puts it into
+                                                                    Signals for the headset HUD. The progress axis is
+                                                                    deprecated and sent as 0)
 
 Run order on the robot NUC (one terminal each):
   1. igris_c controller / bridge (DDS lowstate, lowcmd, handcmd, control-mode service) - human-operated.
@@ -155,14 +156,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=DEFAULT_MOTION_FEEDBACK_TOPIC,
         metavar="TOPIC",
-        help=f"Bare topic of the motion feedback (vr_link teleop_dds Joy_ layout: converging flag + progress, per-arm hold) "
-        f"that vr-link-stream turns into Signals for the headset HUD. Default {DEFAULT_MOTION_FEEDBACK_TOPIC}.",
+        help=f"Bare topic of the motion feedback (vr_link teleop_dds Joy_ layout: converging flag, per-arm hold; the "
+        f"progress axis is deprecated and sent as 0) that vr-link-stream turns into Signals for the headset HUD. "
+        f"Default {DEFAULT_MOTION_FEEDBACK_TOPIC}.",
     )
     dds.add_argument("--no_motion_feedback_dds", action="store_true", help="Do not publish the motion feedback on DDS.")
 
     converge = parser.add_argument_group("convergence ramp (reference starts at the robot's measured pose)")
     converge.add_argument("--no_converge", action="store_true", help="Disable the ramp: the reference jumps to the operator as before.")
-    converge.add_argument("--converge_seconds", type=float, default=2.0, help="Smoothstep blend time from LowState to the live reference.")
+    converge.add_argument(
+        "--converge_seconds", type=float, default=1.0,
+        help="Smoothstep blend time from LowState to the live reference (soft start only: the ramp ends as soon as every "
+        "joint is within the settle tolerance, and a large gap is bounded by the rate cap).",
+    )
     converge.add_argument("--converge_max_rad_s", type=float, default=0.5, help="Per-joint rate cap while converging (0 = no cap).")
     converge.add_argument("--converge_hand_rate", type=float, default=1.0, help="Normalized hand command rate cap (1/s) while converging.")
     converge.add_argument("--lowstate_max_age", type=float, default=0.5, help="A trigger with an older LowState is skipped (seconds).")
@@ -420,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
                     feedback_dds.publish(
                         MotionFeedbackSample(
                             converging=status.converging,
-                            converge_progress=status.progress,
+                            converge_progress=0.0,  # deprecated axis (vr_link 2026-10-21): the HUD shows the flag only
                             arm_hold_left=holding[0],
                             arm_hold_right=holding[1],
                             stamp_ns=int(now * 1e9),
@@ -492,7 +498,8 @@ def main(argv: list[str] | None = None) -> int:
                         else ""
                     )
                     shaping_text = (
-                        f", teleop_state {state.teleop_state.name}, converge {'ACTIVE %.0f%%' % (100 * status.progress) if status.converging else 'idle'}"
+                        f", teleop_state {state.teleop_state.name}, converge "
+                        f"{'ACTIVE (blend %.0f%%, residual %.3f rad)' % (100 * status.progress, status.residual) if status.converging else 'idle'}"
                         f" (started {converge.started}, skipped {converge.skipped}), arm hold L:{int(holding[0])} R:{int(holding[1])}"
                     )
                     if lowstate_dds is not None:
