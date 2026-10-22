@@ -21,6 +21,7 @@ logger = logging.getLogger("igris_c_teleop.ros")
 
 DEFAULT_ROS_DOMAIN_ID = 91  # must match the igris_c_inference command.yaml source.params.domain_id
 DEFAULT_ROS_TOPIC = "/gmr/teleop/retarget_frame"
+DEFAULT_ACTIVE_TOPIC = "/gmr/teleop/active"
 DEFAULT_NODE_NAME = "igris_c_teleop_producer"
 
 
@@ -29,7 +30,7 @@ def _import_ros() -> dict[str, Any]:
         import rclpy
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
         from rclpy.signals import SignalHandlerOptions
-        from std_msgs.msg import String
+        from std_msgs.msg import Bool, String
     except ImportError as exc:
         raise SystemExit(
             f"rclpy / std_msgs not importable ({exc}). Run inside the pixi environment "
@@ -38,6 +39,7 @@ def _import_ros() -> dict[str, Any]:
     return {
         "rclpy": rclpy,
         "String": String,
+        "Bool": Bool,
         "QoSProfile": QoSProfile,
         "ReliabilityPolicy": ReliabilityPolicy,
         "DurabilityPolicy": DurabilityPolicy,
@@ -54,6 +56,7 @@ class RetargetFrameRosPublisher:
         *,
         domain_id: int = DEFAULT_ROS_DOMAIN_ID,
         topic: str = DEFAULT_ROS_TOPIC,
+        active_topic: str = DEFAULT_ACTIVE_TOPIC,
         node_name: str = DEFAULT_NODE_NAME,
         ros: dict[str, Any] | None = None,
     ) -> None:
@@ -61,6 +64,7 @@ class RetargetFrameRosPublisher:
         rclpy = self._ros["rclpy"]
         self.domain_id = int(domain_id)
         self.topic = str(topic)
+        self.active_topic = str(active_topic)
         self.node_name = str(node_name)
         # The producer owns SIGINT/SIGTERM; rclpy must not install its own handlers.
         rclpy.init(args=None, domain_id=self.domain_id, signal_handler_options=self._ros["SignalHandlerOptions"].NO)
@@ -72,7 +76,15 @@ class RetargetFrameRosPublisher:
             durability=self._ros["DurabilityPolicy"].VOLATILE,
         )
         self._publisher = self._node.create_publisher(self._ros["String"], self.topic, qos)
+        active_qos = self._ros["QoSProfile"](
+            depth=1,
+            history=self._ros["HistoryPolicy"].KEEP_LAST,
+            reliability=self._ros["ReliabilityPolicy"].RELIABLE,
+            durability=self._ros["DurabilityPolicy"].TRANSIENT_LOCAL,
+        )
+        self._active_publisher = self._node.create_publisher(self._ros["Bool"], self.active_topic, active_qos)
         self._string_type = self._ros["String"]
+        self._bool_type = self._ros["Bool"]
         self.published = 0
         self._closed = False
 
@@ -81,6 +93,11 @@ class RetargetFrameRosPublisher:
         message.data = payload
         self._publisher.publish(message)
         self.published += 1
+
+    def publish_active(self, active: bool) -> None:
+        message = self._bool_type()
+        message.data = bool(active)
+        self._active_publisher.publish(message)
 
     def subscription_count(self) -> int:
         """Matched subscribers (the inference node's motion terms count as 2)."""
@@ -97,6 +114,7 @@ class RetargetFrameRosPublisher:
         rclpy = self._ros["rclpy"]
         try:
             self._node.destroy_publisher(self._publisher)
+            self._node.destroy_publisher(self._active_publisher)
             self._node.destroy_node()
         finally:
             try:
@@ -105,4 +123,4 @@ class RetargetFrameRosPublisher:
                 logger.warning("rclpy shutdown: %s", exc)
 
 
-__all__ = ["DEFAULT_NODE_NAME", "DEFAULT_ROS_DOMAIN_ID", "DEFAULT_ROS_TOPIC", "RetargetFrameRosPublisher"]
+__all__ = ["DEFAULT_ACTIVE_TOPIC", "DEFAULT_NODE_NAME", "DEFAULT_ROS_DOMAIN_ID", "DEFAULT_ROS_TOPIC", "RetargetFrameRosPublisher"]

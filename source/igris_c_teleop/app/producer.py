@@ -60,6 +60,7 @@ from vr_link.messages.teleop_dds import CONTROLLER_TOPIC as DEFAULT_CONTROLLER_T
 from vr_link.messages.teleop_dds import MOTION_FEEDBACK_TOPIC as DEFAULT_MOTION_FEEDBACK_TOPIC
 from vr_link.messages.teleop_dds import MotionFeedbackSample, controller_sample_from_vr_state
 from vr_link.network.dds.teleop import ControllerStatePublisher, MotionFeedbackPublisher
+from vr_link.types import TeleopState
 
 from ..dds import (
     DEFAULT_HAND_TOPIC,
@@ -77,7 +78,7 @@ from ..dds import (
 from ..retarget.hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
 from ..retarget.neck import NeckOverride, head_relative_neck_angles
 from ..retarget.retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, to_ros_payload
-from ..ros.publisher import DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
+from ..ros.publisher import DEFAULT_ACTIVE_TOPIC, DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
 from ..shaping.arm_hold import SIDES, ArmHold
 from ..shaping.converge import ConvergeGate, low_level_modes_from_sdk
 from ..uplink.controller import ConnectionSessions, ControllerEvents
@@ -118,6 +119,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ros = parser.add_argument_group("ROS 2 output (motion reference)")
     ros.add_argument("--ros_domain_id", type=int, default=DEFAULT_ROS_DOMAIN_ID, help="Must match the inference command.yaml domain_id.")
     ros.add_argument("--ros_topic", type=str, default=DEFAULT_ROS_TOPIC)
+    ros.add_argument("--ros_active_topic", type=str, default=DEFAULT_ACTIVE_TOPIC)
     ros.add_argument("--ros_node_name", type=str, default=DEFAULT_NODE_NAME)
 
     dds = parser.add_argument_group("igris_c_sdk DDS output (hand command, control mode)")
@@ -327,8 +329,12 @@ def main(argv: list[str] | None = None) -> int:
                 "the motion feedback and the convergence ramp (needs LowState) are off."
             )
 
-        ros = RetargetFrameRosPublisher(domain_id=args.ros_domain_id, topic=args.ros_topic, node_name=args.ros_node_name)
+        ros = RetargetFrameRosPublisher(
+            domain_id=args.ros_domain_id, topic=args.ros_topic, active_topic=args.ros_active_topic, node_name=args.ros_node_name
+        )
         logger.info("ROS 2 publisher %s on %s (domain %d, RELIABLE depth 1)", args.ros_node_name, args.ros_topic, args.ros_domain_id)
+        ros.publish_active(False)
+        logger.info("VR active state on %s (Bool, initial false, TRANSIENT_LOCAL depth 1)", args.ros_active_topic)
 
         if args.replay_vrs1 is not None:
             device = Vrs1FileSource(args.replay_vrs1)
@@ -351,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         window_ik_seconds = 0.0
         last_wait_log = time.monotonic()
         last_teleop_state = None
+        last_active = False
 
         while not stop:
             state = device.advance(0.0)
@@ -363,6 +370,15 @@ def main(argv: list[str] | None = None) -> int:
             if connected and state.teleop_state != last_teleop_state:
                 logger.info("headset teleop_state %s", state.teleop_state.name)
                 last_teleop_state = state.teleop_state
+
+            active = connected and state.teleop_state == TeleopState.ACTIVE
+            if active != last_active:
+                try:
+                    ros.publish_active(active)
+                    last_active = active
+                    logger.info("VR active state %s", active)
+                except Exception as exc:
+                    logger.warning("ROS active state publish failed: %s", exc)
 
             for event in events.update(connected, state):
                 if control is not None:
@@ -546,6 +562,10 @@ def main(argv: list[str] | None = None) -> int:
             channel.release()
         if ros is not None:
             published = ros.published
+            try:
+                ros.publish_active(False)
+            except Exception as exc:
+                logger.warning("ROS active state shutdown publish failed: %s", exc)
             ros.close()
             logger.info("Stopped after %d published ROS frames.", published)
     return 0

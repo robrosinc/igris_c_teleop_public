@@ -23,6 +23,7 @@ headset (vr_system, VRS1 FlatBuffers over TCP -> this host :9102)
                                                                     operator on Start / Resume / low-level entry
   -> RetargetFramePayloadBuilder -> to_ros_payload (JSON)
   -> ROS 2 std_msgs/String  /gmr/teleop/retarget_frame  (domain 91, RELIABLE depth 1)
+  -> ROS 2 std_msgs/Bool    /gmr/teleop/active          (true only with a connected skeleton and VRS1 Active)
        -> igris_c_inference_node  motion term (23 policy joints -> ONNX WBC -> DDS lowcmd)
                                   motion_command term (6 wrist + 2 neck -> direct joint targets)
   -> HandTargets -> HandCmdDdsPublisher     DDS <ns>/handcmd  (12 normalized motors, 100 Hz)
@@ -91,6 +92,15 @@ keybody_rot_local, link_body_list, record_meta`. The consumer parser
 (igris_c_inference_public `MotionReferenceSource.cpp`) requires `dof_pos, dof_vel, root_rot,
 link_body_list, keybody_rot_local` and ignores the rest. `tests/consumer_oracle.py` is a
 Python port of that parser used by the contract tests.
+
+The separate `/gmr/teleop/active` Bool topic publishes `false` at startup and
+shutdown, `true` when a complete skeleton arrives with VRS1 `teleop_state=Active`,
+and `false` on Pause, Resuming, or skeleton disconnect. It publishes on changes,
+so each return to Active emits `true` again. It uses RELIABLE, TRANSIENT_LOCAL,
+KEEP_LAST(1), so a late subscriber can request the latest value:
+`ROS_DOMAIN_ID=91 ros2 topic echo /gmr/teleop/active --qos-durability transient_local`.
+Change the topic with `--ros_active_topic`. Older headsets that send `Unknown`
+remain `false`.
 
 Controller button mapping (one rising edge, only while the skeleton is connected; identical
 to the retired `igris_c_gmt_public` `gmr_control_mode_dds_bridge`):
