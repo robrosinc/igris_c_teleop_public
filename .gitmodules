@@ -1,7 +1,7 @@
 [submodule "thirdparty/gmr"]
 	path = thirdparty/gmr
-	url = git@bitbucket.org:robrosinc/gmr.git
+	url = ../gmr.git
 	branch = origin/main
 [submodule "thirdparty/vr_link"]
 	path = thirdparty/vr_link
-	url = git@bitbucket.org:robrosinc/vr_link.git
+	url = ../vr_link.git
