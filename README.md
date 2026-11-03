@@ -104,18 +104,24 @@ producer publishes nothing until a headset skeleton is connected.
    | `--dds_namespace` | robot bridge namespace (`<ns>/handcmd`, `<ns>/lowstate`, ...) | none, required |
    | `--dds_domain_id` | robot bridge DDS domain | 0 |
    | `--ros_domain_id` | inference node `domain_id` (`command.yaml`) | 91 |
-3. Start the inference node:
-   ```bash
-   ros2 run igris_c_inference_public igris_c_inference_node --config <policy>/params.yaml
-   ```
+3. Start the inference node. Step 2 retargets the operator's motion and publishes the whole-body
+   reference frame on `/gmr/teleop/retarget_frame`; the inference node subscribes to that frame
+   (`MotionReferenceSource`), runs the policy and sends the final joint command to the robot. It is a
+   separate repository: see [igris_c_inference_public](https://github.com/robrosinc/igris_c_inference_public)
+   for its setup, configuration and run commands.
 
 Other ways to run:
 
 ```bash
 pixi run producer -- --dds_namespace igris_c_<unit> --dds_domain_id <id> --ros_domain_id <id>   # producer only, no video downlink
-pixi run replay -- <file>.vrs1 --ros_domain_id <id>                                             # ROS only, replay a recording without a headset
 pixi run producer -- --help                                                                     # all options
 ```
+
+`producer` runs the retargeting pipeline alone, without `vr-link-stream`: nothing is sent back to
+the headset, so teleop is a pass-through without vision feedback. Start `vr_system` with
+**NO CAMERA** checked in this mode. The convergence ramp and arm hold still run on the robot
+side; only their HUD indicators (and the robot state overlay) are missing, because those reach
+the headset through `vr-link-stream`.
 
 Useful options: `--no_dds` (ROS output only), `--dds_topic_naming native|ros_compatible` (must
 match the robot's transport setting), `--measure_fps` (loop statistics in the log).
@@ -128,15 +134,15 @@ bridge and the inference node actually use before trusting a silent run.
 Before the first use on hardware, and after bumping a submodule or the SDK wheel:
 
 1. `pixi run check-env`, `pixi run test`, `pixi run test-ros` pass.
-2. `pixi run replay -- <file>.vrs1`: `ros2 topic hz /gmr/teleop/retarget_frame` reports about 100 Hz
-   (`ROS_DOMAIN_ID=91`); the inference node attached to the replay reports ready within 5 s.
-3. Same with a live headset. Publishing stops on disconnect and resumes on reconnect.
-4. With torque off: hand command arrives on the bridge at 100 Hz; each controller button sends
+2. With a live headset in **Active**: `ros2 topic hz /gmr/teleop/retarget_frame` reports about
+   100 Hz (`ROS_DOMAIN_ID=91`); the inference node reports ready within 5 s of starting. Publishing
+   stops on headset disconnect and resumes on reconnect.
+3. With torque off: hand command arrives on the bridge at 100 Hz; each controller button sends
    exactly one control-mode request per press.
-5. With torque on, safe posture: Pause the headset, move the arms away, Resume. The robot moves
+4. With torque on, safe posture: Pause the headset, move the arms away, Resume. The robot moves
    smoothly to the operator's pose with no jump, and the HUD shows the converging indicator
    until the log reports `convergence ramp finished`.
-6. Bare hands: cover one hand. That arm stays still while the rest follows; it ramps back
+5. Bare hands: cover one hand. That arm stays still while the rest follows; it ramps back
    smoothly after uncovering.
 
 Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`.
