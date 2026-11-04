@@ -80,7 +80,7 @@ from ..retarget.neck import NeckOverride, head_relative_neck_angles
 from ..retarget.retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, to_ros_payload
 from ..ros.publisher import DEFAULT_ACTIVE_TOPIC, DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
 from ..shaping.arm_hold import SIDES, ArmHold
-from ..shaping.converge import ConvergeGate, low_level_modes_from_sdk
+from ..shaping.converge import ConvergeGate, ConvergeStatus, low_level_modes_from_sdk
 from ..uplink.controller import ConnectionSessions, ControllerEvents
 from ..uplink.vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
 
@@ -185,6 +185,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--measure_fps", action="store_true", help="Print solve rate, IK time and output counters every 2 s.")
     parser.add_argument("--log_level", type=str, default="INFO")
     return parser.parse_args(argv)
+
+
+def _build_reference_payload(
+    builder: RetargetFramePayloadBuilder, qpos: np.ndarray, now: float, status: ConvergeStatus
+) -> str:
+    # A ramp starts at measured joints, potentially jumping from the previous
+    # reference. Do not differentiate across that replacement. Reset only on
+    # the start edge so velocity feedback resumes while the ramp continues.
+    if status.trigger is not None:
+        builder.reset()
+    return to_ros_payload(builder.build(qpos, now))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -479,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
                         last_dds_error_log = now
 
             try:
-                ros.publish(to_ros_payload(builder.build(qpos, now)))
+                ros.publish(_build_reference_payload(builder, qpos, now, status))
             except Exception as exc:
                 if now - last_ros_error_log > 2.0:
                     logger.warning("ROS frame publish failed: %s", exc)
