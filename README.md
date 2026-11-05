@@ -24,6 +24,7 @@ igris_c_teleop
    └─ outputs
         ├─ ROS 2  reference motion frame  ──>  igris_c_inference_node  ──>  robot (lowcmd)
         ├─ DDS    hand command            ──>  robot
+        ├─ DDS    walk velocity (cmd_vel) ──>  robot   (thumbsticks; consumed in walk mode)
         ├─ DDS    control-mode request    ──>  robot   (controller buttons)
         └─ DDS    motion feedback         ──>  headset HUD (via vr-link-stream)
 
@@ -59,6 +60,30 @@ only thing between the operator and a joint jump. All are enabled by default.
 | Left thumbstick click | motion preset HOME |
 
 Right A is consumed by the headset itself. Buttons are only read while the headset is Active.
+
+## Walk velocity (thumbsticks)
+
+While the headset is Active the thumbsticks are published as a `cmd_vel` (`TwistStamped`) on DDS,
+which the robot consumes in its walk mode (Low Level Walkmode) and ignores in low-level joint
+control. Layout and numbers are the robot gamepad's (igris_c `joystick_publisher_node.cpp`), so
+VR and gamepad feel the same. `--no_walk_dds` disables it.
+
+| Thumbstick | Command |
+|---|---|
+| Left forward / back | walk forward / backward (`vx`) |
+| Left left / right | step left / right (`vy`) |
+| Right left / right | turn left / right (yaw rate) |
+
+Full deflection gives `--walk_max_linear` (default 0.5 m/s) and `--walk_max_yaw_rate` (default
+0.8 rad/s); the deadzone (`--walk_deadzone`, default 0.1) is radial on the left stick and scalar
+on the right, rescaled so the command starts at 0 just outside it. The robot's controller clamps
+each axis to +-1 and its walk policy adds its own deadband and filter. The stream runs at the
+producer rate while Active; one zero command is sent when the headset pauses, the skeleton is lost
+or the producer exits, and nothing is sent while paused (the controller also zeroes the command
+after 500 ms without a sample). The axis signs follow the VRS1 thumbstick convention (+x right,
++y forward) and have not been verified on the headset yet: check them with torque off
+(`--measure_fps` logs the command) and flip with `--walk_invert_lateral` / `--walk_invert_yaw`
+if needed.
 
 ## Setup
 
@@ -144,6 +169,10 @@ Before the first use on hardware, and after bumping a submodule or the SDK wheel
    until the log reports `convergence ramp finished`.
 5. Bare hands: cover one hand. That arm stays still while the rest follows; it ramps back
    smoothly after uncovering.
+6. Walk velocity, torque off first: with the headset Active, push each thumbstick axis and read
+   `cmd_vel` on the bridge (`--measure_fps` prints vx/vy/yaw): left forward gives +vx, left
+   left gives +vy, right left gives +yaw rate, release gives 0, Pause sends one 0 and then
+   nothing. Only then, in walk mode with torque on and a clear floor, at the default maxima.
 
 Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`.
 

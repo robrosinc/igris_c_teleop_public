@@ -58,9 +58,55 @@ class _FakeTime:
 class _FakeHeader:
     def __init__(self):
         self.stamp_value = None
+        self.frame = None
 
     def stamp(self, value):
         self.stamp_value = value
+
+    def frame_id(self, value):
+        self.frame = value
+
+
+class _FakeVector3:
+    def __init__(self):
+        self.values = {}
+
+    def x(self, value):
+        self.values["x"] = value
+
+    def y(self, value):
+        self.values["y"] = value
+
+    def z(self, value):
+        self.values["z"] = value
+
+
+class _FakeTwist:
+    def __init__(self):
+        self._linear, self._angular = _FakeVector3(), _FakeVector3()
+
+    def linear(self):
+        return self._linear
+
+    def angular(self):
+        return self._angular
+
+
+class _FakeTwistStamped:
+    """Binding shape: ``twist()`` returns the nested struct, ``twist(value)`` stores it back."""
+
+    def __init__(self):
+        self.header_value = None
+        self._twist = _FakeTwist()
+        self.twist_set = None
+
+    def header(self, value):
+        self.header_value = value
+
+    def twist(self, value=None):
+        if value is None:
+            return self._twist
+        self.twist_set = value
 
 
 class _FakeMasterArmState:
@@ -208,6 +254,8 @@ def _fake_sdk(legacy_names: bool = False):
         ChannelFactory=_ChannelFactory,
         HandCmdPublisher=_publisher,
         MasterArmStatePublisher=_publisher,
+        TwistStampedPublisher=_publisher,
+        TwistStamped=_FakeTwistStamped,
         LowStateSubscriber=_subscriber,
         RobotStateSubscriber=_subscriber,
         subscribers=subscribers,
@@ -286,6 +334,32 @@ def test_hand_publisher_writes_motor_order():
     with pytest.raises(ValueError):
         hand.publish(np.zeros(6))
     hand.close()
+    assert publishers[0].stops == 1
+
+
+# -- cmd_vel publisher --------------------------------------------------------------------
+
+
+def test_cmd_vel_publisher_writes_twist_stamped_with_default_qos():
+    from igris_c_teleop.uplink.walk import WalkVelocity
+
+    sdk, _channel, publishers = _fake_sdk()
+    dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
+    walk = dds_io.CmdVelDdsPublisher(dds)
+    assert walk.topic == "cmd_vel" and walk.resolved_topic == "igris_c_IG07/cmd_vel"
+    assert len(publishers) == 1 and publishers[0].topic == "cmd_vel" and publishers[0].qos == "default"
+
+    walk.publish(WalkVelocity(vx=0.25, vy=-0.1, yaw_rate=0.4), stamp=12.75)
+    (message,) = publishers[0].written
+    assert message.twist_set is message._twist
+    assert message._twist.linear().values == {"x": 0.25, "y": -0.1, "z": 0.0}
+    assert message._twist.angular().values == {"x": 0.0, "y": 0.0, "z": 0.4}
+    assert message.header_value.frame == dds_io.CMD_VEL_FRAME_ID
+    assert (message.header_value.stamp_value.sec_value, message.header_value.stamp_value.nanosec_value) == (12, 750_000_000)
+    assert walk.published == 1 and walk.rejected == 0
+    with pytest.raises(ValueError):
+        walk.publish(WalkVelocity(vx=float("nan")), stamp=1.0)
+    walk.close()
     assert publishers[0].stops == 1
 
 

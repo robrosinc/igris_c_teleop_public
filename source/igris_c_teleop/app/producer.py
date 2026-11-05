@@ -12,6 +12,10 @@ Pipeline::
       -> RetargetFramePayloadBuilder -> RetargetFrameRosPublisher   /gmr/teleop/retarget_frame (String, domain 91)
                                                                     -> igris_c_inference_node (ONNX WBC -> DDS lowcmd)
       -> HandTargets -> HandCmdDdsPublisher                         <ns>/handcmd (DDS HandCmd, fingers bypass the policy)
+      -> ThumbstickWalk -> CmdVelDdsPublisher (--no_walk_dds)       <ns>/cmd_vel (DDS TwistStamped: left stick -> vx/vy,
+                                                                    right stick -> yaw rate, the robot's gamepad layout and
+                                                                    numbers; the robot's walk mode consumes it, the
+                                                                    low-level policy ignores it)
       -> ControllerEvents -> ControlModeClient                      <ns>/service/control_mode/request (DDS service)
       -> RefStateDdsPublisher (opt-in, --ref_dds_topic)             <ns>/gmr/refstate (DDS MasterArmState: the 31
                                                                     retargeted joints, headset hand-overlay display only)
@@ -36,6 +40,10 @@ Controller buttons (rising edge, once per press, while the skeleton is connected
   right thumbstick click -> joint position hold (stop), left thumbstick click -> preset HOME.
   Right A is consumed by the headset. While the headset is Paused it re-sends a frozen snapshot,
   so buttons are only detectable while Active. ``--no_mode_events`` disables all three.
+Thumbsticks (walk velocity, while Active): left forward/back -> vx, left left/right -> vy, right
+  left/right -> yaw rate, as on the robot's gamepad (uplink/walk.py). cmd_vel streams at the producer
+  rate while Active and one stop sample goes out when the headset pauses, the skeleton is lost or the
+  producer exits (the robot's controller also zeroes it after 500 ms without a sample).
 
 DDS outputs are ON by default (``--no_dds`` for a ROS-only session, e.g. with ``--replay_vrs1``).
 They move the robot and change its control mode: ROBROS hardware approval and the verification
@@ -63,11 +71,13 @@ from vr_link.network.dds.teleop import ControllerStatePublisher, MotionFeedbackP
 from vr_link.types import TeleopState
 
 from ..dds import (
+    DEFAULT_CMD_VEL_TOPIC,
     DEFAULT_HAND_TOPIC,
     DEFAULT_LOWSTATE_TOPIC,
     DEFAULT_REF_TOPIC,
     DEFAULT_ROBOTSTATE_TOPIC,
     TOPIC_NAMINGS,
+    CmdVelDdsPublisher,
     ControlModeClient,
     DdsChannel,
     HandCmdDdsPublisher,
@@ -82,6 +92,7 @@ from ..ros.publisher import DEFAULT_ACTIVE_TOPIC, DEFAULT_NODE_NAME, DEFAULT_ROS
 from ..shaping.arm_hold import SIDES, ArmHold
 from ..shaping.converge import ConvergeGate, low_level_modes_from_sdk
 from ..uplink.controller import ConnectionSessions, ControllerEvents
+from ..uplink.walk import DEFAULT_DEADZONE, DEFAULT_MAX_LINEAR, DEFAULT_MAX_YAW_RATE, WALK_STOP, ThumbstickWalk
 from ..uplink.vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
 
 logger = logging.getLogger("igris_c_teleop")
@@ -164,6 +175,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     dds.add_argument("--no_motion_feedback_dds", action="store_true", help="Do not publish the motion feedback on DDS.")
 
+    walk = parser.add_argument_group("walk velocity (cmd_vel from the thumbsticks, robot walk mode)")
+    walk.add_argument("--no_walk_dds", action="store_true", help="Do not publish cmd_vel (thumbsticks ignored).")
+    walk.add_argument("--cmd_vel_dds_topic", type=str, default=DEFAULT_CMD_VEL_TOPIC, help="Bare TwistStamped topic (resolved under the namespace).")
+    walk.add_argument("--walk_max_linear", type=float, default=DEFAULT_MAX_LINEAR, help="Walk speed (vx, vy) at full left-stick deflection (m/s); gamepad kMaxLinear.")
+    walk.add_argument("--walk_max_yaw_rate", type=float, default=DEFAULT_MAX_YAW_RATE, help="Turn rate at full right-stick deflection (rad/s); gamepad kMaxAngular.")
+    walk.add_argument("--walk_deadzone", type=float, default=DEFAULT_DEADZONE, help="Stick deadzone in [0, 1): radial on the left stick, scalar on the right; gamepad kDeadzone.")
+    walk.add_argument("--walk_invert_lateral", action="store_true", help="Flip the left-stick x -> vy sign.")
+    walk.add_argument("--walk_invert_yaw", action="store_true", help="Flip the right-stick x -> yaw rate sign.")
+
     converge = parser.add_argument_group("convergence ramp (reference starts at the robot's measured pose)")
     converge.add_argument("--no_converge", action="store_true", help="Disable the ramp: the reference jumps to the operator as before.")
     converge.add_argument(
@@ -223,6 +243,16 @@ def main(argv: list[str] | None = None) -> int:
     # Arm hold needs a per-hand source decision even when the finger command is off.
     hold_arbiter = HandSourceArbiter(None) if not hands.enabled else None
     events = ControllerEvents(enabled=not args.no_mode_events)
+    try:
+        walk = ThumbstickWalk(
+            max_linear=args.walk_max_linear,
+            max_yaw_rate=args.walk_max_yaw_rate,
+            deadzone=args.walk_deadzone,
+            invert_lateral=args.walk_invert_lateral,
+            invert_yaw=args.walk_invert_yaw,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"--walk_*: {exc}") from exc
     arm_hold = ArmHold(
         gmr.model,
         enabled=args.arm_hold == "on",
@@ -262,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     channel: DdsChannel | None = None
     control: ControlModeClient | None = None
     hand_dds: HandCmdDdsPublisher | None = None
+    walk_dds: CmdVelDdsPublisher | None = None
     ref_dds: RefStateDdsPublisher | None = None
     controller_dds: ControllerStatePublisher | None = None
     feedback_dds: MotionFeedbackPublisher | None = None
@@ -270,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     ros: RetargetFrameRosPublisher | None = None
     device = None
     stop = False
+    walk_streaming = False  # cmd_vel samples went out on the previous tick: one stop sample is owed on exit
 
     def _request_stop(signum, frame):  # noqa: ARG001
         nonlocal stop
@@ -297,6 +329,17 @@ def main(argv: list[str] | None = None) -> int:
                 if control is not None
                 else "; control-mode requests disabled (--no_mode_events)",
             )
+            if not args.no_walk_dds:
+                walk_dds = CmdVelDdsPublisher(channel, args.cmd_vel_dds_topic)
+                logger.warning(
+                    "cmd_vel on %s at %.0f Hz while Active (left stick vx/vy<=%.2f m/s; right stick yaw<=%.2f rad/s; "
+                    "deadzone %.2f; gamepad layout): walks the robot in its walk mode.",
+                    walk_dds.resolved_topic,
+                    args.target_fps,
+                    walk.max_linear,
+                    walk.max_yaw_rate,
+                    walk.deadzone,
+                )
             if args.ref_dds_topic:
                 ref_dds = RefStateDdsPublisher(channel, args.ref_dds_topic)
                 logger.info(
@@ -358,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         last_wait_log = time.monotonic()
         last_teleop_state = None
         last_active = False
+        walk_command = WALK_STOP
 
         while not stop:
             state = device.advance(0.0)
@@ -384,6 +428,19 @@ def main(argv: list[str] | None = None) -> int:
                 if control is not None:
                     control.request(event)
                 logger.warning("controller event: %s%s", event, "" if control is not None else " (not sent: DDS off)")
+
+            if walk_dds is not None:
+                # Stream while Active; when leaving Active (pause, skeleton lost) send one stop so the
+                # robot does not keep the last velocity. Nothing goes out while paused or disconnected.
+                walk_command = walk.command(state, active) if connected else WALK_STOP
+                if active or walk_streaming:
+                    try:
+                        walk_dds.publish(walk_command, time.time())
+                    except Exception as exc:
+                        if time.time() - last_dds_error_log > 2.0:
+                            logger.warning("cmd_vel DDS publish failed: %s", exc)
+                            last_dds_error_log = time.time()
+                walk_streaming = active
 
             if not connected:
                 builder.reset()
@@ -501,6 +558,11 @@ def main(argv: list[str] | None = None) -> int:
                         hands_text = f", hands L:{left_source} R:{right_source} q_right={np.round(hand_values[:6], 2).tolist()}"
                         if hand_dds is not None:
                             hands_text += f", HandCmd written {hand_dds.published} (rejected {hand_dds.rejected})"
+                    if walk_dds is not None:
+                        hands_text += (
+                            f", cmd_vel vx={walk_command.vx:.2f} vy={walk_command.vy:.2f} yaw={walk_command.yaw_rate:.2f} "
+                            f"written {walk_dds.published} (rejected {walk_dds.rejected})"
+                        )
                     if ref_dds is not None:
                         hands_text += f", RefState written {ref_dds.published} (rejected {ref_dds.rejected})"
                     if controller_dds is not None:
@@ -540,7 +602,8 @@ def main(argv: list[str] | None = None) -> int:
                     window_ik_seconds = 0.0
             rate.sleep()
     finally:
-        # Teardown: input -> service worker -> hand publisher -> ref publisher -> controller relay -> DDS channel -> ROS.
+        # Teardown: input -> service worker -> hand publisher -> walk stop + publisher -> ref publisher -> controller
+        # relay -> DDS channel -> ROS.
         if device is not None:
             device.close()
         events.enabled = False
@@ -548,6 +611,13 @@ def main(argv: list[str] | None = None) -> int:
             control.close()
         if hand_dds is not None:
             hand_dds.close()
+        if walk_dds is not None:
+            if walk_streaming:
+                try:
+                    walk_dds.publish(WALK_STOP, time.time())
+                except Exception as exc:
+                    logger.warning("cmd_vel stop publish failed: %s", exc)
+            walk_dds.close()
         if ref_dds is not None:
             ref_dds.close()
         if controller_dds is not None:

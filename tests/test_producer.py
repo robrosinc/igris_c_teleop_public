@@ -44,6 +44,10 @@ def test_defaults_match_port_plan():
     # Headset controller relay for recorders: on by default, name from the vr_link contract.
     assert args.controller_dds_topic == "vr/controller" and not args.no_controller_dds
     assert producer.parse_args(["--no_controller_dds"]).no_controller_dds
+    # Walk velocity from the thumbsticks: on by default, robot-contract topic, the gamepad node's numbers.
+    assert args.cmd_vel_dds_topic == "cmd_vel" and not args.no_walk_dds
+    assert (args.walk_max_linear, args.walk_max_yaw_rate, args.walk_deadzone) == (0.5, 0.8, 0.1)
+    assert not args.walk_invert_lateral and not args.walk_invert_yaw
     for removed in ("redis_ip", "redis_port", "hand_dds", "auto_start_event", "stream_port"):
         assert not hasattr(args, removed), removed
 
@@ -63,6 +67,8 @@ def test_dds_namespace_is_required_unless_no_dds():
         producer.main(["--dds_namespace", "igris_c_IG01", "--finger_source", "none"])
     with pytest.raises(SystemExit, match="target_fps"):
         producer.main(["--no_dds", "--target_fps", "0"])
+    with pytest.raises(SystemExit, match="walk"):
+        producer.main(["--no_dds", "--walk_deadzone", "1.5"])
 
 
 def test_reference_shaping_defaults():
