@@ -43,6 +43,9 @@ only thing between the operator and a joint jump. All are enabled by default.
   the robot enters low-level control, the reference is blended from the robot's measured joint
   pose to the operator's pose instead of jumping. The ramp is rate-capped (default 0.5 rad/s) and
   ends as soon as every joint is close to the live reference.
+  Each ramp start or restart resets reference velocity estimation to avoid differentiating
+  across the switch to measured joints. Root and joint velocities are zero for
+  `--zero_velocity_frames` samples afterward (default 10, about 100 ms at 100 Hz).
 - **Arm hold** (`--arm_hold off` to disable). When a bare hand leaves the headset's tracking
   view, that arm is frozen at its last pose instead of following stale body-tracking data.
   Once the hand is tracked again it ramps back smoothly. A hand holding a controller never
