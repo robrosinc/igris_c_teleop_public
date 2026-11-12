@@ -154,6 +154,25 @@ the headset through `vr-link-stream`.
 Useful options: `--no_dds` (ROS output only), `--dds_topic_naming native|ros_compatible` (must
 match the robot's transport setting), `--measure_fps` (loop statistics in the log).
 
+Viewer (on by default, `--no_viewer` to disable): `teleop` and `producer` open a MuJoCo window on
+this PC. It shows the robot at the published reference pose (after the neck override, arm hold and
+convergence ramp) and the GMR IK targets of the same tick, i.e. the scaled human skeleton, as RGB
+frames joined by bones. The arm targets have position weight 0 in the GMR config (orientation
+only), so they do not sit on the robot's arm links. Display only, 30 Hz (`--viewer_fps`). On a host
+without a display (`DISPLAY` / `WAYLAND_DISPLAY` not set, e.g. a headless NUC over plain ssh) the
+viewer is skipped with a warning and the producer runs as before. The window is rendered inside the
+producer process:
+
+- Keep the window open during a session. Closing it stalls the 100 Hz loop once for tens of ms
+  (17 to 52 ms measured); the producer then keeps running without the viewer. Close it only while
+  the headset is Paused, or leave it until Ctrl+C.
+- A lost X connection or a GL driver crash ends the producer. Pass `--no_viewer` over `ssh -X` and
+  wherever the display is not a local desktop session.
+- A `DISPLAY` that is set but not reachable (stale value in tmux, dropped `ssh -X`) ends the
+  producer at startup with MuJoCo's "could not initialize GLFW", before anything is published.
+  Pass `--no_viewer`.
+- `--measure_fps` prints the viewer cost per update next to the IK time.
+
 The startup log prints the resolved topic names and domain ids. Compare them with what the robot
 bridge and the inference node actually use before trusting a silent run.
 
@@ -176,8 +195,12 @@ Before the first use on hardware, and after bumping a submodule or the SDK wheel
    `cmd_vel` on the bridge (`--measure_fps` prints vx/vy/yaw): left forward gives +vx, left
    left gives +vy, right left gives +yaw rate, release gives 0, Pause sends one 0 and then
    nothing. Only then, in walk mode with torque on and a clear floor, at the default maxima.
+7. Viewer (opens by default), on each PC that runs the session, torque off first: with
+   `--measure_fps` the log still reports about 100 Hz and the same IK time as with `--no_viewer`,
+   and the viewer cost stays far below the 10 ms tick (dev PC: 0.4 ms avg, below 1 ms max).
 
 Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`.
+Rollback of the viewer: `--no_viewer`.
 
 ## Submodules
 

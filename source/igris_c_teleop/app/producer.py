@@ -26,6 +26,9 @@ Pipeline::
                                                                     flag, per-arm hold; vr-link-stream puts it into
                                                                     Signals for the headset HUD. The progress axis is
                                                                     deprecated and sent as 0)
+      -> ReferenceViewer (--no_viewer)                              MuJoCo window on this PC: the published reference
+                                                                    pose + the GMR IK targets, display only (app/viewer.py);
+                                                                    skipped on a host without a display
 
 Run order on the robot NUC (one terminal each):
   1. igris_c controller / bridge (DDS lowstate, lowcmd, handcmd, control-mode service) - human-operated.
@@ -94,6 +97,7 @@ from ..shaping.converge import ConvergeGate, ConvergeStatus, low_level_modes_fro
 from ..uplink.controller import ConnectionSessions, ControllerEvents
 from ..uplink.walk import DEFAULT_DEADZONE, DEFAULT_MAX_LINEAR, DEFAULT_MAX_YAW_RATE, WALK_STOP, ThumbstickWalk
 from ..uplink.vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
+from .viewer import DEFAULT_VIEWER_FPS, ReferenceViewer
 
 logger = logging.getLogger("igris_c_teleop")
 
@@ -202,6 +206,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     hold.add_argument("--arm_hold_release_s", type=float, default=0.2, help="Hand must be tracked this long before the hold releases.")
     hold.add_argument("--arm_hold_release_rad_s", type=float, default=0.5, help="Rate cap of the release ramp back to the live reference.")
 
+    viewer = parser.add_argument_group("Viewer (operator PC, display only)")
+    viewer.add_argument(
+        "--no_viewer",
+        action="store_true",
+        help="Do not open the MuJoCo window that shows the published reference pose and the GMR IK targets (scaled human "
+        "skeleton). The window runs inside this process (keep it open during a session) and is skipped on a host "
+        "without a display.",
+    )
+    viewer.add_argument("--viewer_fps", type=float, default=DEFAULT_VIEWER_FPS, help="Viewer update rate (Hz); the loop rate is unchanged.")
+
     parser.add_argument("--measure_fps", action="store_true", help="Print solve rate, IK time and output counters every 2 s.")
     parser.add_argument("--log_level", type=str, default="INFO")
     return parser.parse_args(argv)
@@ -227,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dds_namespace is required (robot-unit namespace); pass --no_dds for a ROS-only session.")
     if not args.no_dds and args.finger_source == "none":
         raise SystemExit("DDS hand output needs a finger source other than 'none' (or pass --no_dds).")
+    if not args.no_viewer and not args.viewer_fps > 0.0:
+        raise SystemExit("--viewer_fps must be positive.")
     velocity_lpf_hz = args.velocity_lpf_hz if args.velocity_lpf_hz > 0.0 else None
 
     from general_motion_retargeting import GeneralMotionRetargeting
@@ -298,8 +314,9 @@ def main(argv: list[str] | None = None) -> int:
         args.lowstate_max_age,
     )
 
-    # Init order: DDS channel -> service client (before any other reader) -> hand publisher -> ref publisher ->
-    # feedback publisher -> LowState / RobotState readers -> ROS.
+    # Init order: viewer (unless --no_viewer) -> DDS channel -> service client (before any other reader) -> hand publisher ->
+    # ref publisher -> feedback publisher -> LowState / RobotState readers -> ROS.
+    viewer: ReferenceViewer | None = None
     channel: DdsChannel | None = None
     control: ControlModeClient | None = None
     hand_dds: HandCmdDdsPublisher | None = None
@@ -319,6 +336,17 @@ def main(argv: list[str] | None = None) -> int:
         stop = True
 
     try:
+        if not args.no_viewer:
+            # First: with an unreachable display MuJoCo ends the process here, before anything is on the wire.
+            viewer = ReferenceViewer.open(gmr, args.robot, fps=args.viewer_fps)
+            if viewer is None:
+                logger.warning("Viewer off: this host has no display (DISPLAY / WAYLAND_DISPLAY not set).")
+            else:
+                logger.info(
+                    "Viewer on (%.0f Hz, display only; --no_viewer disables): reference pose + GMR IK targets. Keep the "
+                    "window open during a session; closing it stalls this loop once for tens of ms.",
+                    args.viewer_fps,
+                )
         if not args.no_dds:
             channel = DdsChannel.create(
                 domain_id=args.dds_domain_id, namespace=args.dds_namespace, topic_naming=args.dds_topic_naming
@@ -553,6 +581,10 @@ def main(argv: list[str] | None = None) -> int:
                     logger.warning("ROS frame publish failed: %s", exc)
                     last_ros_error_log = now
 
+            if viewer is not None:
+                # After every output of the tick. Decimated, never raises; turns itself off on a closed window.
+                viewer.update(qpos, gmr.scaled_human_data)
+
             window_count += 1
             window_ik_seconds += ik_seconds
             if args.measure_fps:
@@ -597,8 +629,15 @@ def main(argv: list[str] | None = None) -> int:
                     if mode_dds is not None:
                         sample = mode_dds.latest()
                         shaping_text += f", robot mode {'none' if sample is None else sample[0]}"
+                    viewer_text = ""
+                    if viewer is not None:
+                        if viewer.active:
+                            viewer_updates, viewer_mean_s, viewer_max_s = viewer.take_stats()
+                            viewer_text = f", viewer {viewer_updates} updates ({1e3 * viewer_mean_s:.2f} ms avg, {1e3 * viewer_max_s:.2f} ms max)"
+                        else:
+                            viewer_text = ", viewer off"
                     logger.info(
-                        "solve %.1f Hz, IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s%s",
+                        "solve %.1f Hz, IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s%s%s",
                         window_count / elapsed,
                         1e3 * window_ik_seconds / max(1, window_count),
                         ros.published,
@@ -607,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
                         hands_text,
                         control_text,
                         shaping_text,
+                        viewer_text,
                     )
                     window_start = time.monotonic()
                     window_count = 0
@@ -614,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
             rate.sleep()
     finally:
         # Teardown: input -> service worker -> hand publisher -> walk stop + publisher -> ref publisher -> controller
-        # relay -> DDS channel -> ROS.
+        # relay -> DDS channel -> ROS -> viewer (last: it waits for the render thread).
         if device is not None:
             device.close()
         events.enabled = False
@@ -649,6 +689,8 @@ def main(argv: list[str] | None = None) -> int:
                 logger.warning("ROS active state shutdown publish failed: %s", exc)
             ros.close()
             logger.info("Stopped after %d published ROS frames.", published)
+        if viewer is not None:
+            viewer.close()
     return 0
 
 
