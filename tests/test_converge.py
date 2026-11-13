@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 from vr_link.types import TeleopState
 
-from igris_c_teleop.shaping.converge import TRIGGER_CONNECT, TRIGGER_LOW_LEVEL, TRIGGER_RESUME, ConvergeGate, low_level_modes_from_sdk
+from igris_c_teleop.shaping.converge import (
+    DEFAULT_FOOT_BODIES,
+    TRIGGER_CONNECT,
+    TRIGGER_LOW_LEVEL,
+    TRIGGER_RESUME,
+    ConvergeGate,
+    low_level_modes_from_sdk,
+)
 
 HINGES = np.arange(7, 38)
 LOW, WALK, WALK_LOW = 3, 10, 6
@@ -230,3 +237,104 @@ def test_low_level_modes_follow_the_binding_constants():
     assert low_level_modes_from_sdk(object()) == frozenset({3, 6})
     with pytest.raises(ValueError):
         _tick(_gate(), _qpos(1.0), 0.0, state=TeleopState.RESUMING, lowstate=(np.zeros(30), 0.0))
+
+
+# --- root pose while the ramp runs (feet-anchored) and joints in step -------------------------------------------
+
+
+def _legs(model, qpos, hip=0.0, knee=0.0, ankle=0.0):
+    """``qpos`` with both legs set to the given pitch angles (hip flexion is negative, knee flexion positive)."""
+
+    import mujoco as mj
+
+    out = np.array(qpos, dtype=np.float64)
+    for side in ("Left", "Right"):
+        for joint, value in (("Hip_Pitch", hip), ("Knee_Pitch", knee), ("Ankle_Pitch", ankle)):
+            out[model.jnt_qposadr[mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, f"Joint_{joint}_{side}")]] = value
+    return out
+
+
+def _feet(model, qpos):
+    import mujoco as mj
+
+    data = mj.MjData(model)
+    data.qpos[:] = qpos
+    mj.mj_kinematics(model, data)
+    return np.array([data.xpos[mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, name)] for name in DEFAULT_FOOT_BODIES])
+
+
+def _tilt(qpos):
+    w, x, y, z = qpos[3:7]
+    return float(np.arccos(np.clip(1.0 - 2.0 * (x * x + y * y), -1.0, 1.0)))  # angle between the root z axis and vertical
+
+
+def test_root_follows_the_joint_ramp_with_the_feet_on_the_live_reference(model, keyframe_qpos):
+    hinges = np.arange(7, model.nq)
+    live = _legs(model, keyframe_qpos)  # operator upright: straight legs
+    crouched = _legs(model, keyframe_qpos, hip=-0.6, knee=1.2, ankle=-0.6)  # robot in a squat, torso upright
+    gate = ConvergeGate(hinges, duration_s=1.0, max_rate=0.5, model=model)
+    qpos = live.copy()
+    status = _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=(crouched[hinges], 0.0), resume=1)
+    assert status.trigger == TRIGGER_RESUME and status.converging
+    # Tick 0: the robot's joints, and a root that puts their feet on the live reference's feet (lower, same tilt).
+    assert np.allclose(qpos[hinges], crouched[hinges])
+    assert np.allclose(_feet(model, qpos), _feet(model, live), atol=1e-6)
+    assert live[2] - qpos[2] > 0.05 and abs(_tilt(qpos) - _tilt(live)) < 1e-6
+    # Joints in step: the largest gap (1.2 rad) sets a 3.6 s blend; the root rises with it and never jumps
+    # (the link offsets make the last few millimetres non-monotonic, hence the small allowance).
+    heights, t = [qpos[2]], 0.0
+    while status.converging and t < 10.0:
+        t += 0.01
+        qpos = live.copy()
+        status = _tick(gate, qpos, t, state=TeleopState.RESUMING, lowstate=(crouched[hinges], 0.0), resume=1)
+        heights.append(qpos[2])
+        assert np.allclose(_feet(model, qpos), _feet(model, live), atol=1e-6)
+    steps = np.diff(heights)
+    assert 3.2 < t < 3.7 and steps.min() > -1e-4 and steps.max() < 2e-3 and status.converged_resume_count == 1
+    assert max(heights) - heights[-1] < 5e-3
+    assert abs(heights[-1] - live[2]) < 2e-3  # the settle tick is within the joint tolerance of the live root
+    # Idle: the root is the live one again, untouched.
+    qpos = live.copy()
+    _tick(gate, qpos, t + 0.01, state=TeleopState.ACTIVE, lowstate=(crouched[hinges], 0.0), resume=1)
+    assert np.array_equal(qpos, live)
+
+
+def test_root_tilt_comes_from_the_ramped_joints_not_from_the_operator(model, keyframe_qpos):
+    hinges = np.arange(7, model.nq)
+    live = _legs(model, keyframe_qpos)
+    bowed = _legs(model, keyframe_qpos, hip=-0.4)  # robot bent 0.4 rad at the hips, feet flat
+    gate = ConvergeGate(hinges, max_rate=0.5, model=model)
+    qpos = live.copy()
+    _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=(bowed[hinges], 0.0))
+    # Feet stay on the live reference's feet, so the bend shows up as torso tilt (the operator's root is upright).
+    assert abs(_tilt(qpos) - _tilt(live) - 0.4) < 1e-3 and np.allclose(_feet(model, qpos), _feet(model, live), atol=1e-6)
+    # Without a model the root stays live (the behaviour before), and a wrong foot body is refused.
+    gate = ConvergeGate(hinges, max_rate=0.5)
+    qpos = live.copy()
+    _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=(bowed[hinges], 0.0))
+    assert np.array_equal(qpos[:7], live[:7]) and np.allclose(qpos[hinges], bowed[hinges])
+    with pytest.raises(ValueError):
+        ConvergeGate(hinges, model=model, foot_bodies=("Link_Ankle_Roll_Left", "no_such_body"))
+
+
+def test_gate_ramps_in_step_by_default_and_per_joint_on_request():
+    lowstate = (np.zeros(31), 0.0)
+    live = _qpos(0.0)
+    live[7], live[8] = 1.2, 0.3  # one large and one small gap
+
+    def run(**kwargs):
+        gate = _gate(max_rate=0.5, **kwargs)
+        t, status = 0.0, _tick(gate, live.copy(), 0.0, state=TeleopState.RESUMING, lowstate=lowstate)
+        small_done = None
+        while status.converging and t < 10.0:
+            t += 0.01
+            qpos = live.copy()
+            status = _tick(gate, qpos, t, state=TeleopState.RESUMING, lowstate=lowstate)
+            if small_done is None and abs(qpos[8] - 0.3) <= 0.02:
+                small_done = t
+        return t, small_done
+
+    total, small = run()
+    assert 3.2 < total < 3.7 and small > 0.8 * total  # both joints arrive together
+    total, small = run(in_step=False)
+    assert 2.3 < total < 2.6 and small < 1.0  # the small gap arrives first, the large one at the cap

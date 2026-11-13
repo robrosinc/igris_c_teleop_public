@@ -20,7 +20,7 @@ VR headset (vr_system)
    ▼
 igris_c_teleop
    ├─ retarget      GMR: human skeleton -> IGRIS-C joints, neck from head pose
-   ├─ shaping       convergence ramp, arm hold (see below)
+   ├─ shaping       resume anchor, convergence ramp, arm hold (see below)
    └─ outputs
         ├─ ROS 2  reference motion frame  ──>  igris_c_inference_node  ──>  robot (lowcmd)
         ├─ DDS    hand command            ──>  robot
@@ -54,8 +54,27 @@ only thing between the operator and a joint jump. All are enabled by default.
   `resume_count` back to the headset (`teleop/motion_feedback` -> `vr-link-stream` ->
   `Signals.converged_resume_count`). A headset build that waits for this acknowledgement stays
   in Resuming until then and reaches Active only with `vr-link-stream` and the motion feedback
-  running (not with `--no_dds` or `--no_motion_feedback_dds`). The ramp covers the joints only:
-  the root pose (torso tilt and height) follows the operator at once.
+  running (not with `--no_dds` or `--no_motion_feedback_dds`).
+  The joints move in step: one blend sized by the largest gap, so that this joint peaks at the
+  rate cap and all others reach the same fraction of their own gap at the same time (a large
+  posture change therefore takes longer than the cap alone would: about 4.4 s for a 84 deg knee
+  gap). `--converge_per_joint` restores the fixed `--converge_seconds` blend with each joint
+  capped on its own, where joints with small gaps arrive first and the torso passes through
+  postures that lie on neither side of the change.
+  While the ramp runs, the root pose (torso tilt and height) is recomputed from the ramped
+  joints with the feet kept where the live reference has its feet, so it starts at the pose
+  the robot is in and ends on the operator's root together with the joints.
+  `--no_converge_root` leaves the root at the operator's live value instead (it then steps at
+  the resume by the full tilt and height difference).
+- **Resume anchor** (`--no_resume_anchor` to disable). A turn or a walk made while paused is
+  not passed to the retargeting: on every Start/Resume the operator's skeleton is rotated about
+  the vertical axis and shifted horizontally, once, so that it continues with the heading (hip
+  line) and foot position of the last skeleton that was retargeted. Without it the reference
+  yaw and position step in one tick; the inference node holds the heading, but it rotates its
+  whole reference history by the current correction, so the frames from before the step read as
+  turned by the full angle until they leave the history window. Posture differences (joints,
+  tilt, height) are not touched here; the convergence ramp handles them. The log reports
+  `operator frame re-anchored at resume` with the turn and the distance.
 - **Arm hold** (`--arm_hold off` to disable). When a bare hand leaves the headset's tracking
   view, that arm is frozen at its last pose instead of following stale body-tracking data.
   Once the hand is tracked again it ramps back smoothly. A hand holding a controller never
@@ -212,6 +231,9 @@ Before the first use on hardware, and after bumping a submodule or the SDK wheel
 Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`
 (with a headset build that waits for the resume acknowledgement keep the motion feedback on:
 `--no_converge --arm_hold off`).
+Rollback of the resume handling to the joints-only ramp, each switch on its own:
+`--no_resume_anchor` (heading/position alignment), `--no_converge_root` (root follows the ramp),
+`--converge_per_joint` (joints in step).
 Rollback of the viewer: `--no_viewer`.
 
 ## Submodules

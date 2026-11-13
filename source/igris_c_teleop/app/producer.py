@@ -92,6 +92,7 @@ from ..retarget.hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
 from ..retarget.neck import NeckOverride, head_relative_neck_angles
 from ..retarget.retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayloadBuilder, to_ros_payload
 from ..ros.publisher import DEFAULT_ACTIVE_TOPIC, DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
+from ..shaping.anchor import OperatorFrameAnchor
 from ..shaping.arm_hold import SIDES, ArmHold
 from ..shaping.converge import ConvergeGate, ConvergeStatus, low_level_modes_from_sdk
 from ..uplink.controller import ConnectionSessions, ControllerEvents
@@ -192,10 +193,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     converge.add_argument("--no_converge", action="store_true", help="Disable the ramp: the reference jumps to the operator as before.")
     converge.add_argument(
         "--converge_seconds", type=float, default=1.0,
-        help="Smoothstep blend time from LowState to the live reference (soft start only: the ramp ends as soon as every "
-        "joint is within the settle tolerance, and a large gap is bounded by the rate cap).",
+        help="Shortest smoothstep blend time from LowState to the live reference. The ramp ends as soon as every joint is "
+        "within the settle tolerance; for a large gap the blend is stretched so that the joint with the largest gap "
+        "peaks at the rate cap and all joints move in step.",
     )
-    converge.add_argument("--converge_max_rad_s", type=float, default=0.5, help="Per-joint rate cap while converging (0 = no cap).")
+    converge.add_argument("--converge_max_rad_s", type=float, default=0.6, help="Per-joint rate cap while converging (0 = no cap).")
+    converge.add_argument(
+        "--converge_per_joint", action="store_true",
+        help="Do not stretch the blend: fixed --converge_seconds, each joint capped on its own (the behaviour before the "
+        "in-step ramp; joints with small gaps arrive first).",
+    )
+    converge.add_argument(
+        "--no_converge_root", action="store_true",
+        help="Leave the root pose (torso tilt and height) at the operator's live value while the joints ramp, instead of "
+        "recomputing it from the ramped joints with the feet kept on the live reference's feet.",
+    )
+    converge.add_argument(
+        "--no_resume_anchor", action="store_true",
+        help="Do not align the operator's heading and position at a Start/Resume to the last retargeted skeleton: a turn "
+        "or a walk while paused then reaches the reference as a jump.",
+    )
     converge.add_argument("--converge_hand_rate", type=float, default=1.0, help="Normalized hand command rate cap (1/s) while converging.")
     converge.add_argument("--lowstate_max_age", type=float, default=0.5, help="A trigger with an older LowState waits, holding the reference, until a fresh one arrives (seconds).")
     converge.add_argument("--lowstate_dds_topic", type=str, default=DEFAULT_LOWSTATE_TOPIC, help="Bare LowState topic (robot joint positions).")
@@ -293,10 +310,13 @@ def main(argv: list[str] | None = None) -> int:
         hand_rate=args.converge_hand_rate,
         lowstate_max_age_s=args.lowstate_max_age,
         enabled=not args.no_converge and not args.no_dds,
+        in_step=not args.converge_per_joint,
+        model=None if args.no_converge_root else gmr.model,
     )
+    anchor = OperatorFrameAnchor(enabled=not args.no_resume_anchor)
     logger.info(
         "GMR %s: nq=%d dof=%d keybodies=%d; neck override -> qpos%s (ranges %s); fingers=%s; arm hold %s (release after %.2f s, %.2f rad/s); "
-        "convergence ramp %s (%.1f s, %.2f rad/s cap, hand %.2f/s, LowState max age %.2f s)",
+        "convergence ramp %s (%.1f s, %.2f rad/s cap, hand %.2f/s, LowState max age %.2f s, joints %s, root %s); resume anchor %s",
         args.robot,
         builder.nq,
         builder.dof_count,
@@ -312,6 +332,9 @@ def main(argv: list[str] | None = None) -> int:
         args.converge_max_rad_s,
         args.converge_hand_rate,
         args.lowstate_max_age,
+        "per joint (--converge_per_joint)" if args.converge_per_joint else "in step",
+        "live (--no_converge_root)" if args.no_converge_root else "feet-anchored",
+        "on" if anchor.enabled else "off (--no_resume_anchor)",
     )
 
     # Init order: viewer (unless --no_viewer) -> DDS channel -> service client (before any other reader) -> hand publisher ->
@@ -486,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                 hands.reset()
                 arm_hold.reset()
                 converge.reset()
+                anchor.reset()
                 last_teleop_state = None
                 if hold_arbiter is not None:
                     hold_arbiter.reset()
@@ -503,7 +527,11 @@ def main(argv: list[str] | None = None) -> int:
 
             now = time.time()
             ik_start = time.perf_counter()
-            qpos = gmr.retarget(build_human_data(state), offset_to_ground=True)
+            # A Start/Resume keeps the operator's heading and position where the last retargeted skeleton had them
+            # (one rigid horizontal transform, re-fixed on the resume edge), so the reference shows no jump for a
+            # turn or a walk made while paused. Posture differences are left to the convergence ramp below.
+            human = anchor.update(build_human_data(state), teleop_state=state.teleop_state, resume_count=state.resume_count)
+            qpos = gmr.retarget(human, offset_to_ground=True)
             ik_seconds = time.perf_counter() - ik_start
 
             neck_yaw_pitch = neck.apply(qpos, head_relative_neck_angles(state))
@@ -634,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
                         f", teleop_state {state.teleop_state.name}, resume_count {state.resume_count} "
                         f"(acknowledged {status.converged_resume_count}), converge {converge_text}"
                         f" (started {converge.started}, deferred {converge.deferred}), arm hold L:{int(holding[0])} R:{int(holding[1])}"
+                        f", resume anchor yaw {math.degrees(anchor.yaw):.1f} deg (re-anchored {anchor.realigned})"
                     )
                     if lowstate_dds is not None:
                         sample = lowstate_dds.latest()

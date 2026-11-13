@@ -8,10 +8,23 @@ hinge joints of the retargeted ``qpos`` with a :class:`~.ramp.JointRamp` from
 the latest ``LowState`` toward the live reference; everything downstream (FK
 keybodies, finite-difference velocities, refstate overlay) is computed from
 the ramped ``qpos``, so the inference node sees one consistent, slowly moving
-reference. The ramp never touches the root pose (``qpos[:7]``). The ramp ends as
-soon as every hinge is within ``settle_tol`` of the live reference (a
-reference already next to the robot releases at once); ``duration_s`` only
-shapes the soft start and ``max_rate`` bounds the speed of a large gap.
+reference. The ramp ends as soon as every hinge is within ``settle_tol`` of the
+live reference (a reference already next to the robot releases at once);
+``duration_s`` shapes the soft start and ``max_rate`` bounds the speed of a
+large gap. By default the joints move in step (``in_step``, see
+:mod:`.ramp`): one blend sized by the largest gap, so the body stays on a
+path between the two postures.
+
+Root pose while the ramp runs. The root (``qpos[:7]``, the torso) is not a
+joint, so a joint ramp alone leaves it at the operator's live value: after a
+posture change the reference shows the robot's joints under the operator's
+torso tilt and height (feet far above or below the floor). With a model the
+gate recomputes the root every ramp tick so that the feet of the ramped joints
+stay where the live reference has its feet (:class:`FeetAnchoredRoot`): tilt
+and height then follow the joint ramp, start at the pose the robot is in and
+end on the live root. Outside the ramp the root is never touched. The
+operator's heading and horizontal position are not handled here; a resume
+keeps them continuous upstream (:mod:`.anchor`).
 
 Triggers (each starts, or restarts, the ramp):
 
@@ -74,6 +87,83 @@ def low_level_modes_from_sdk(sdk) -> frozenset[int]:
 
 
 WAITING_LOG_PERIOD_S = 2.0
+FREE_JOINT_QPOS_SIZE = 7  # root pos (3) + root quat wxyz (4), first in qpos
+DEFAULT_FOOT_BODIES: tuple[str, str] = ("Link_Ankle_Roll_Left", "Link_Ankle_Roll_Right")
+
+
+class ResumeEdge:
+    """The headset's Start/Resume request on the VRS1 stream.
+
+    True on the record that reports ``RESUMING`` after any other state, or
+    ``RESUMING`` with a new ``resume_count`` (a new request whose PAUSED
+    records the newest-only receiver never saw). One rule for the convergence
+    gate and the operator frame anchor; each keeps its own instance.
+    """
+
+    def __init__(self) -> None:
+        self._prev_state: TeleopState | None = None
+        self._prev_count = 0
+
+    def reset(self) -> None:
+        self._prev_state = None
+        self._prev_count = 0
+
+    def update(self, teleop_state: TeleopState, resume_count: int) -> bool:
+        resume_count = int(resume_count)
+        edge = teleop_state == TeleopState.RESUMING and (self._prev_state != TeleopState.RESUMING or resume_count != self._prev_count)
+        self._prev_state = teleop_state
+        self._prev_count = resume_count
+        return edge
+
+
+class FeetAnchoredRoot:
+    """Root pose that keeps the feet of a ramped joint vector on the live reference's feet.
+
+    For each foot: ``root = live foot pose * inverse(root->foot of the ramped
+    joints)``; the result is the mean of the left and right solutions (they
+    agree when the ramped joints equal the live ones, so the ramp ends on the
+    live root). Needs a model whose root is a free joint at ``qpos[0:7]``.
+    """
+
+    def __init__(self, model, foot_bodies: tuple[str, str] = DEFAULT_FOOT_BODIES) -> None:
+        import mujoco as mj
+
+        self._mj = mj
+        self._model = model
+        self._data = mj.MjData(model)
+        self._feet = []
+        for name in foot_bodies:
+            body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, name)
+            if body < 0:
+                raise ValueError(f"foot body {name!r} is not in the model")
+            self._feet.append(int(body))
+
+    def _feet_pose(self, qpos: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+        self._data.qpos[:] = qpos
+        self._mj.mj_kinematics(self._model, self._data)
+        return [(self._data.xpos[f].copy(), self._data.xmat[f].reshape(3, 3).copy()) for f in self._feet]
+
+    def solve(self, q_live: np.ndarray, q_ramped: np.ndarray) -> np.ndarray:
+        """``(pos xyz, quat wxyz)`` of the root for the joints of ``q_ramped``; both are full ``qpos`` vectors."""
+
+        live = self._feet_pose(q_live)
+        local = np.array(q_ramped, dtype=np.float64)
+        local[:3] = 0.0
+        local[3:FREE_JOINT_QPOS_SIZE] = (1.0, 0.0, 0.0, 0.0)
+        relative = self._feet_pose(local)
+        position = np.zeros(3)
+        quat_sum = np.zeros(4)
+        quat = np.zeros(4)
+        for (p_live, r_live), (p_rel, r_rel) in zip(live, relative):
+            r_root = r_live @ r_rel.T
+            position += p_live - r_root @ p_rel
+            self._mj.mju_mat2Quat(quat, r_root.reshape(-1))
+            # Same hemisphere before averaging; the normalized sum of two unit quaternions is their midpoint.
+            quat_sum += quat if float(quat @ quat_sum) >= 0.0 else -quat
+        root = np.empty(FREE_JOINT_QPOS_SIZE)
+        root[:3] = position / len(live)
+        root[3:] = quat_sum / np.linalg.norm(quat_sum)
+        return root
 
 
 @dataclass(frozen=True)
@@ -100,6 +190,9 @@ class ConvergeGate:
         low_level_modes: frozenset[int] = DEFAULT_LOW_LEVEL_MODES,
         enabled: bool = True,
         settle_tol: float = 0.02,
+        in_step: bool = True,
+        model=None,
+        foot_bodies: tuple[str, str] = DEFAULT_FOOT_BODIES,
     ) -> None:
         self.hinge_indices = np.asarray(hinge_indices, dtype=np.int64)
         self.duration_s = float(duration_s)
@@ -108,11 +201,13 @@ class ConvergeGate:
         self.low_level_modes = frozenset(int(m) for m in low_level_modes)
         self.enabled = bool(enabled)
         self.settle_tol = float(settle_tol)
+        self.in_step = bool(in_step)
+        # Root follows the joint ramp only with a model (feet-anchored); without one the root stays live.
+        self._root: FeetAnchoredRoot | None = None if model is None else FeetAnchoredRoot(model, foot_bodies)
         self._ramp: JointRamp | None = None
         self._hand = RateLimiter(hand_rate)
-        self._prev_teleop_state: TeleopState | None = None
+        self._resume_edge = ResumeEdge()
         self._prev_mode: int | None = None
-        self._prev_resume_count = 0
         self._pending: str | None = None  # trigger waiting for a fresh LowState
         self._pending_since = 0.0
         self._pending_logged: float | None = None  # time of the last "waiting" log, None before the first one
@@ -144,23 +239,18 @@ class ConvergeGate:
         self._ramp = None
         self._pending = None
         self._held_qpos = None
-        self._prev_teleop_state = None
-        self._prev_resume_count = 0
+        self._resume_edge.reset()
         self._resume_request = 0
         self._converged_resume_count = 0
         self._hand.reset()
 
     def _triggers(self, teleop_state: TeleopState, connected_edge: bool, robot_mode: int | None, resume_count: int) -> list[str]:
         found: list[str] = []
-        resuming = teleop_state == TeleopState.RESUMING
-        # A new id inside RESUMING is a new request whose PAUSED records the newest-only receiver never saw.
-        if resuming and (self._prev_teleop_state != TeleopState.RESUMING or resume_count != self._prev_resume_count):
+        if self._resume_edge.update(teleop_state, resume_count):
             found.append(TRIGGER_RESUME)
             self._resume_request = resume_count
         elif connected_edge and teleop_state == TeleopState.UNKNOWN:
             found.append(TRIGGER_CONNECT)
-        self._prev_teleop_state = teleop_state
-        self._prev_resume_count = resume_count
         if robot_mode is not None:
             entering = robot_mode in self.low_level_modes and self._prev_mode is not None and self._prev_mode not in self.low_level_modes
             self._prev_mode = int(robot_mode)
@@ -228,17 +318,32 @@ class ConvergeGate:
                 raise ValueError(f"LowState has {q0.size} joints, the reference has {self.hinge_indices.size}.")
             gap = float(np.max(np.abs(q0 - qpos[self.hinge_indices])))
             self._ramp = JointRamp(
-                self.hinge_indices, q0, duration_s=self.duration_s, max_rate=self.max_rate, now=now, settle_tol=self.settle_tol
+                self.hinge_indices,
+                q0,
+                duration_s=self.duration_s,
+                max_rate=self.max_rate,
+                now=now,
+                settle_tol=self.settle_tol,
+                in_step=self.in_step,
             )
             trigger, self._pending = self._pending, None
             self.started += 1
             logger.warning(
-                "convergence ramp started (%s): max gap %.3f rad, %.1f s smoothstep, %.2f rad/s cap", trigger, gap, self.duration_s, self.max_rate
+                "convergence ramp started (%s): max gap %.3f rad, %.2f rad/s cap, joints %s, root %s",
+                trigger,
+                gap,
+                self.max_rate,
+                "in step" if self.in_step else f"per joint ({self.duration_s:.1f} s smoothstep)",
+                "follows the ramp (feet-anchored)" if self._root is not None else "live",
             )
 
         converging, progress, residual = False, 1.0, 0.0
         if self._ramp is not None:
+            q_live = np.array(qpos, dtype=np.float64) if self._root is not None else None
             progress = self._ramp.apply(qpos, now)
+            if q_live is not None:
+                # The joints are no longer the live ones: put the root where their feet meet the live reference's feet.
+                qpos[:FREE_JOINT_QPOS_SIZE] = self._root.solve(q_live, qpos)
             if self._ramp.done:
                 logger.warning("convergence ramp finished after %.2f s (residual %.3f rad)", now - self._ramp._t0, self._ramp.residual)
                 self._ramp = None
@@ -283,11 +388,14 @@ class ConvergeGate:
 
 
 __all__ = [
+    "DEFAULT_FOOT_BODIES",
     "DEFAULT_LOW_LEVEL_MODES",
     "TRIGGER_CONNECT",
     "TRIGGER_LOW_LEVEL",
     "TRIGGER_RESUME",
     "ConvergeGate",
     "ConvergeStatus",
+    "FeetAnchoredRoot",
+    "ResumeEdge",
     "low_level_modes_from_sdk",
 ]

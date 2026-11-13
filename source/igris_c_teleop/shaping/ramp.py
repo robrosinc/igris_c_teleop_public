@@ -13,6 +13,16 @@ a reference already next to the robot still took the full ``duration_s``).
 ``duration_s`` therefore only shapes the soft start: a small gap settles
 early, a large one is bounded by ``max_rate`` and ends after the blend.
 
+With the per-joint cap alone, joints with a small gap arrive long before the
+ones with a large gap, so the body passes through postures that lie on
+neither side of the change (a crouch-to-stand ramp tips the torso past its
+end value while the knees are still on their way). ``in_step=True`` keeps all
+joints at the same fraction of their own gap: the blend time is stretched on
+the first ``apply`` to ``1.5 * largest_gap / max_rate`` (never below
+``duration_s``), which is the smoothstep length whose steepest point moves
+the joint with the largest gap at exactly ``max_rate``. The cap stays in
+place for a live reference that moves during the ramp.
+
 ``RateLimiter`` is the scalar-vector form used for the normalized hand command.
 """
 
@@ -39,6 +49,7 @@ class JointRamp:
         now: float,
         settle_tol: float = 0.02,
         max_dt: float = 0.1,
+        in_step: bool = False,
     ) -> None:
         self.indices = np.asarray(indices, dtype=np.int64)
         self._out = np.array(start, dtype=np.float64).reshape(-1)
@@ -49,6 +60,9 @@ class JointRamp:
         self.max_rate = float(max_rate)
         self.settle_tol = float(settle_tol)
         self.max_dt = float(max_dt)
+        self.in_step = bool(in_step)
+        # Blend time actually used. An in-step ramp sizes it from the largest gap on the first apply.
+        self.blend_s: float | None = None if self.in_step and self.max_rate > 0.0 else self.duration_s
         self._t0 = float(now)
         self._last = float(now)
         self.progress = 0.0
@@ -71,7 +85,11 @@ class JointRamp:
         dt = min(self.max_dt, max(0.0, now - self._last))
         self._last = now
         live = np.asarray(qpos[self.indices], dtype=np.float64)
-        u = 1.0 if self.duration_s <= 0.0 else (now - self._t0) / self.duration_s
+        if self.blend_s is None:
+            # Smoothstep peaks at 1.5 * gap / T: stretch T until the largest gap peaks at max_rate.
+            gap = float(np.max(np.abs(live - self._start))) if self._start.size else 0.0
+            self.blend_s = max(self.duration_s, 1.5 * gap / self.max_rate)
+        u = 1.0 if self.blend_s <= 0.0 else (now - self._t0) / self.blend_s
         s = smoothstep(u)
         target = self._start + s * (live - self._start)
         step = target - self._out

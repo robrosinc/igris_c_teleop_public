@@ -80,3 +80,42 @@ def test_rate_limiter_tracks_then_limits():
     assert np.allclose(limiter.limit([5.0, 5.05], 0.3), [5.0, 5.05])
     limiter.reset()
     assert np.allclose(limiter.limit([7.0, 7.0], 1.0), [7.0, 7.0])
+
+
+def test_in_step_ramp_keeps_every_joint_at_the_same_fraction_of_its_gap():
+    # Gaps 1.5 and 0.3 rad: per joint the small one arrives first; in step both follow one smoothstep
+    # whose length makes the large gap peak at the 0.5 rad/s cap (1.5 * 1.5 / 0.5 = 4.5 s).
+    live = np.array([1.5, 0.3])
+    ramp = JointRamp([0, 1], [0.0, 0.0], duration_s=1.0, max_rate=0.5, now=0.0, in_step=True)
+    assert ramp.blend_s is None
+    outputs, t = [], 0.0
+    while not ramp.done and t < 10.0:
+        t += 0.01
+        qpos = live.copy()
+        ramp.apply(qpos, t)
+        outputs.append(qpos.copy())
+    outputs = np.array(outputs)
+    assert ramp.blend_s == 4.5 and 4.0 < t < 4.6  # settles inside the tolerance shortly before the blend ends
+    moving = outputs[:-1]  # the settle tick is within tolerance, not on the curve
+    assert np.allclose(moving[:, 0] / 1.5, moving[:, 1] / 0.3, atol=1e-9)
+    steps = np.diff(np.vstack([[0.0, 0.0], outputs]), axis=0)
+    assert steps.max() <= 0.5 * 0.01 + 1e-9  # the cap is met, not exceeded
+    assert steps[:, 0].max() > 0.49 * 0.01  # and reached at the steepest point
+    # Per joint (the default): the small gap is done long before the large one.
+    ramp = JointRamp([0, 1], [0.0, 0.0], duration_s=1.0, max_rate=0.5, now=0.0)
+    assert ramp.blend_s == 1.0
+    for tick in range(1, 101):
+        qpos = live.copy()
+        ramp.apply(qpos, 0.01 * tick)
+    assert abs(qpos[1] - 0.3) < 1e-9 and qpos[0] < 0.6 and not ramp.done
+
+
+def test_in_step_ramp_never_shortens_the_blend_and_needs_a_rate_cap():
+    # A small gap keeps duration_s (soft start) and still settles early.
+    ramp = JointRamp([0], [0.0], duration_s=1.0, max_rate=0.5, now=0.0, in_step=True)
+    qpos = np.array([0.1])
+    ramp.apply(qpos, 0.0)
+    assert ramp.blend_s == 1.0
+    # Without a cap there is nothing to size the blend from: plain duration_s.
+    ramp = JointRamp([0], [0.0], duration_s=1.0, max_rate=0.0, now=0.0, in_step=True)
+    assert ramp.blend_s == 1.0
