@@ -103,6 +103,12 @@ class RateLimiter:
         self._prev = None
         self._last = None
 
+    @property
+    def current(self) -> np.ndarray | None:
+        """The last output (tracked or limited), or None before the first one."""
+
+        return None if self._prev is None else self._prev.copy()
+
     def track(self, values, now: float) -> None:
         """Record ``values`` as the current output without limiting (pass-through mode)."""
 

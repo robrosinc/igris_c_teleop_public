@@ -53,3 +53,6 @@ CLAUDE.md
 # pixi environment and editable-install metadata
 .pixi/
 *.egg-info/
+
+# VS Code
+.vscode/

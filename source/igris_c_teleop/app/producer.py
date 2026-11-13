@@ -197,7 +197,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     converge.add_argument("--converge_max_rad_s", type=float, default=0.5, help="Per-joint rate cap while converging (0 = no cap).")
     converge.add_argument("--converge_hand_rate", type=float, default=1.0, help="Normalized hand command rate cap (1/s) while converging.")
-    converge.add_argument("--lowstate_max_age", type=float, default=0.5, help="A trigger with an older LowState is skipped (seconds).")
+    converge.add_argument("--lowstate_max_age", type=float, default=0.5, help="A trigger with an older LowState waits, holding the reference, until a fresh one arrives (seconds).")
     converge.add_argument("--lowstate_dds_topic", type=str, default=DEFAULT_LOWSTATE_TOPIC, help="Bare LowState topic (robot joint positions).")
     converge.add_argument("--robotstate_dds_topic", type=str, default=DEFAULT_ROBOTSTATE_TOPIC, help="Bare RobotState topic (control mode).")
 
@@ -530,7 +530,10 @@ def main(argv: list[str] | None = None) -> int:
                 connected_edge=connected_edge,
                 robot_mode=mode_sample[0] if mode_sample is not None else None,
                 lowstate=lowstate_dds.latest() if lowstate_dds is not None else None,
+                resume_count=state.resume_count,
             )
+            # While a trigger waits for a fresh LowState, qpos is the held reference and the hand command the held one
+            # (None, like the frame below, when there is no earlier output to hold).
             hand_values = converge.shape_hand(hand_values, now)
 
             if feedback_dds is not None:
@@ -542,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
                             arm_hold_left=holding[0],
                             arm_hold_right=holding[1],
                             stamp_ns=int(now * 1e9),
+                            # The headset leaves Resuming for Active when this equals its VRState.resume_count.
+                            converged_resume_count=status.converged_resume_count,
                         )
                     )
                 except Exception as exc:
@@ -555,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
                     if now - last_dds_error_log > 2.0:
                         logger.warning("HandCmd DDS publish failed: %s", exc)
                         last_dds_error_log = now
-            if ref_dds is not None:
+            if ref_dds is not None and status.publish:
                 # After the neck override so the headset's FK sees the same neck the policy is told.
                 try:
                     ref_dds.publish(qpos[FREE_JOINT_QPOS_SIZE:], now)
@@ -574,12 +579,13 @@ def main(argv: list[str] | None = None) -> int:
                         logger.warning("Controller relay DDS publish failed: %s", exc)
                         last_dds_error_log = now
 
-            try:
-                ros.publish(_build_reference_payload(builder, qpos, now, status))
-            except Exception as exc:
-                if now - last_ros_error_log > 2.0:
-                    logger.warning("ROS frame publish failed: %s", exc)
-                    last_ros_error_log = now
+            if status.publish:
+                try:
+                    ros.publish(_build_reference_payload(builder, qpos, now, status))
+                except Exception as exc:
+                    if now - last_ros_error_log > 2.0:
+                        logger.warning("ROS frame publish failed: %s", exc)
+                        last_ros_error_log = now
 
             if viewer is not None:
                 # After every output of the tick. Decimated, never raises; turns itself off on a closed window.
@@ -618,10 +624,16 @@ def main(argv: list[str] | None = None) -> int:
                         if control is not None
                         else ""
                     )
+                    if status.waiting:
+                        converge_text = "WAITING for LowState (reference %s)" % ("held" if status.publish else "not published")
+                    elif status.converging:
+                        converge_text = "ACTIVE (blend %.0f%%, residual %.3f rad)" % (100 * status.progress, status.residual)
+                    else:
+                        converge_text = "idle"
                     shaping_text = (
-                        f", teleop_state {state.teleop_state.name}, converge "
-                        f"{'ACTIVE (blend %.0f%%, residual %.3f rad)' % (100 * status.progress, status.residual) if status.converging else 'idle'}"
-                        f" (started {converge.started}, skipped {converge.skipped}), arm hold L:{int(holding[0])} R:{int(holding[1])}"
+                        f", teleop_state {state.teleop_state.name}, resume_count {state.resume_count} "
+                        f"(acknowledged {status.converged_resume_count}), converge {converge_text}"
+                        f" (started {converge.started}, deferred {converge.deferred}), arm hold L:{int(holding[0])} R:{int(holding[1])}"
                     )
                     if lowstate_dds is not None:
                         sample = lowstate_dds.latest()

@@ -46,6 +46,16 @@ only thing between the operator and a joint jump. All are enabled by default.
   Each ramp start or restart resets reference velocity estimation to avoid differentiating
   across the switch to measured joints. Root and joint velocities are zero for
   `--zero_velocity_frames` samples afterward (default 10, about 100 ms at 100 Hz).
+  A ramp always starts from a fresh `LowState` (`--lowstate_max_age`, default 0.5 s). When none
+  is there at that moment the producer waits: it holds the last reference and hand command it
+  published (on a first start it publishes nothing) and starts the ramp when one arrives; the
+  log repeats `convergence ramp waiting` meanwhile.
+  When the ramp of a Start or Resume has finished, the producer reports that request's
+  `resume_count` back to the headset (`teleop/motion_feedback` -> `vr-link-stream` ->
+  `Signals.converged_resume_count`). A headset build that waits for this acknowledgement stays
+  in Resuming until then and reaches Active only with `vr-link-stream` and the motion feedback
+  running (not with `--no_dds` or `--no_motion_feedback_dds`). The ramp covers the joints only:
+  the root pose (torso tilt and height) follows the operator at once.
 - **Arm hold** (`--arm_hold off` to disable). When a bare hand leaves the headset's tracking
   view, that arm is frozen at its last pose instead of following stale body-tracking data.
   Once the hand is tracked again it ramps back smoothly. A hand holding a controller never
@@ -199,7 +209,9 @@ Before the first use on hardware, and after bumping a submodule or the SDK wheel
    `--measure_fps` the log still reports about 100 Hz and the same IK time as with `--no_viewer`,
    and the viewer cost stays far below the 10 ms tick (dev PC: 0.4 ms avg, below 1 ms max).
 
-Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`.
+Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`
+(with a headset build that waits for the resume acknowledgement keep the motion feedback on:
+`--no_converge --arm_hold off`).
 Rollback of the viewer: `--no_viewer`.
 
 ## Submodules
