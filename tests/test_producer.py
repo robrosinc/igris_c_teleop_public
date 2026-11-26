@@ -78,6 +78,9 @@ def test_reference_shaping_defaults():
     # Convergence ramp: on by default, 1 s smoothstep soft start from LowState (2026-10-21, was 2 s), 0.6 rad/s cap, hand 1.0/s.
     assert not args.no_converge and args.converge_seconds == 1.0 and args.converge_max_rad_s == 0.6
     assert args.converge_hand_rate == 1.0 and args.lowstate_max_age == 0.5
+    # The ramp shapes arms and neck; the waist and leg reference stays live (2026-11-26, was every joint).
+    assert args.converge_joints == "upper"
+    assert producer.parse_args(["--converge_joints", "all"]).converge_joints == "all"
     assert args.lowstate_dds_topic == "lowstate" and args.robotstate_dds_topic == "robotstate"
     # Arm hold on bare-hand tracking loss: on by default, 0.2 s re-acquire, 0.5 rad/s release.
     assert args.arm_hold == "on" and args.arm_hold_release_s == 0.2 and args.arm_hold_release_rad_s == 0.5

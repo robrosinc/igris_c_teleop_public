@@ -3,8 +3,8 @@
 Without it the reference published to the inference node jumps to the
 operator's pose the moment teleoperation (re)starts or the robot enters
 low-level control, and the robot follows that jump (igris_c's own SlowStart
-only rate-limits the arms, once, at mode entry). The gate replaces the 31
-hinge joints of the retargeted ``qpos`` with a :class:`~.ramp.JointRamp` from
+only rate-limits the arms, once, at mode entry). The gate replaces hinge
+joints of the retargeted ``qpos`` with a :class:`~.ramp.JointRamp` from
 the latest ``LowState`` toward the live reference; everything downstream (FK
 keybodies, finite-difference velocities, refstate overlay) is computed from
 the ramped ``qpos``, so the inference node sees one consistent, slowly moving
@@ -15,6 +15,14 @@ large gap. By default the joints move in step (``in_step``, see
 :mod:`.ramp`): one blend sized by the largest gap, so the body stays on a
 path between the two postures.
 
+Which joints. The gate ramps the hinges in ``ramp_indices`` and leaves the
+others at the live reference. The producer's default set is ``upper``
+(:func:`converge_qpos_indices`): shoulders, elbows, wrists and neck. Wrists and
+neck reach the robot as direct joint targets, so they need the ramp; the waist
+and the legs are balance joints of the whole-body policy and their reference
+then follows the operator from the first frame, without a ramp. ``all`` ramps
+every hinge (the behaviour before 2026-11-26).
+
 Root pose while the ramp runs. The root (``qpos[:7]``, the torso) is not a
 joint, so a joint ramp alone leaves it at the operator's live value: after a
 posture change the reference shows the robot's joints under the operator's
@@ -22,7 +30,9 @@ torso tilt and height (feet far above or below the floor). With a model the
 gate recomputes the root every ramp tick so that the feet of the ramped joints
 stay where the live reference has its feet (:class:`FeetAnchoredRoot`): tilt
 and height then follow the joint ramp, start at the pose the robot is in and
-end on the live root. Outside the ramp the root is never touched. The
+end on the live root. This applies only when a ramped joint lies between the
+root and a foot; with the ``upper`` set no such joint is ramped and the root
+stays live. Outside the ramp the root is never touched. The
 operator's heading and horizontal position are not handled here; a resume
 keeps them continuous upstream (:mod:`.anchor`).
 
@@ -90,6 +100,30 @@ WAITING_LOG_PERIOD_S = 2.0
 FREE_JOINT_QPOS_SIZE = 7  # root pos (3) + root quat wxyz (4), first in qpos
 DEFAULT_FOOT_BODIES: tuple[str, str] = ("Link_Ankle_Roll_Left", "Link_Ankle_Roll_Right")
 
+# Joint sets the ramp can shape. ``upper`` selects hinges by these name parts (arms and neck); the waist and the
+# legs are left out.
+CONVERGE_JOINT_SETS: tuple[str, ...] = ("upper", "all")
+UPPER_BODY_JOINT_KEYWORDS: tuple[str, ...] = ("Shoulder", "Elbow", "Wrist", "Neck")
+
+
+def converge_qpos_indices(model, joint_set: str) -> np.ndarray:
+    """qpos indices of the hinges of ``joint_set`` (``upper`` or ``all``), in model order."""
+
+    import mujoco as mj
+
+    if joint_set not in CONVERGE_JOINT_SETS:
+        raise ValueError(f"Unknown converge joint set {joint_set!r}; expected one of {CONVERGE_JOINT_SETS}.")
+    indices = []
+    for joint in range(model.njnt):
+        if model.jnt_type[joint] != mj.mjtJoint.mjJNT_HINGE:
+            continue
+        name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_JOINT, joint) or ""
+        if joint_set == "all" or any(keyword in name for keyword in UPPER_BODY_JOINT_KEYWORDS):
+            indices.append(int(model.jnt_qposadr[joint]))
+    if not indices:
+        raise ValueError(f"The model has no hinge joint in the {joint_set!r} set.")
+    return np.array(indices, dtype=np.int64)
+
 
 class ResumeEdge:
     """The headset's Start/Resume request on the VRS1 stream.
@@ -137,6 +171,21 @@ class FeetAnchoredRoot:
             if body < 0:
                 raise ValueError(f"foot body {name!r} is not in the model")
             self._feet.append(int(body))
+        # qpos entries of the joints between the root and a foot (the free joint itself excluded).
+        chain: set[int] = set()
+        for body in self._feet:
+            while body > 0:
+                first = int(model.body_jntadr[body])
+                for joint in range(first, first + int(model.body_jntnum[body])):
+                    if model.jnt_type[joint] != mj.mjtJoint.mjJNT_FREE:
+                        chain.add(int(model.jnt_qposadr[joint]))
+                body = int(model.body_parentid[body])
+        self._chain_qpos = frozenset(chain)
+
+    def moved_by(self, qpos_indices) -> bool:
+        """True when changing one of these qpos entries moves a foot relative to the root."""
+
+        return any(int(index) in self._chain_qpos for index in np.asarray(qpos_indices).reshape(-1))
 
     def _feet_pose(self, qpos: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
         self._data.qpos[:] = qpos
@@ -193,8 +242,20 @@ class ConvergeGate:
         in_step: bool = True,
         model=None,
         foot_bodies: tuple[str, str] = DEFAULT_FOOT_BODIES,
+        ramp_indices=None,
     ) -> None:
-        self.hinge_indices = np.asarray(hinge_indices, dtype=np.int64)
+        # hinge_indices: qpos indices of all hinges, in LowState order. ramp_indices: the ones the ramp shapes
+        # (None = all); the other hinges stay at the live reference.
+        self.hinge_indices = np.asarray(hinge_indices, dtype=np.int64).reshape(-1)
+        ramp = self.hinge_indices if ramp_indices is None else np.asarray(ramp_indices, dtype=np.int64).reshape(-1)
+        position = {int(index): slot for slot, index in enumerate(self.hinge_indices)}
+        unknown = [int(index) for index in ramp if int(index) not in position]
+        if ramp.size == 0 or unknown or len(set(ramp.tolist())) != ramp.size:
+            raise ValueError(
+                f"ramp_indices must be a non-empty, duplicate-free subset of hinge_indices (not hinges: {unknown})."
+            )
+        self.ramp_indices = ramp
+        self._ramp_select = np.array([position[int(index)] for index in ramp], dtype=np.int64)  # slots in LowState
         self.duration_s = float(duration_s)
         self.max_rate = float(max_rate)
         self.lowstate_max_age_s = float(lowstate_max_age_s)
@@ -202,8 +263,10 @@ class ConvergeGate:
         self.enabled = bool(enabled)
         self.settle_tol = float(settle_tol)
         self.in_step = bool(in_step)
-        # Root follows the joint ramp only with a model (feet-anchored); without one the root stays live.
-        self._root: FeetAnchoredRoot | None = None if model is None else FeetAnchoredRoot(model, foot_bodies)
+        # Root follows the joint ramp only with a model (feet-anchored) and only when a ramped joint lies between
+        # the root and a foot; otherwise the root stays live.
+        root = None if model is None else FeetAnchoredRoot(model, foot_bodies)
+        self._root: FeetAnchoredRoot | None = root if root is not None and root.moved_by(self.ramp_indices) else None
         self._ramp: JointRamp | None = None
         self._hand = RateLimiter(hand_rate)
         self._resume_edge = ResumeEdge()
@@ -220,6 +283,10 @@ class ConvergeGate:
     @property
     def active(self) -> bool:
         return self._ramp is not None
+
+    @property
+    def root_follows_ramp(self) -> bool:
+        return self._root is not None
 
     @property
     def waiting(self) -> bool:
@@ -316,10 +383,11 @@ class ConvergeGate:
             q0 = np.asarray(lowstate[0], dtype=np.float64).reshape(-1)
             if q0.shape != self.hinge_indices.shape:
                 raise ValueError(f"LowState has {q0.size} joints, the reference has {self.hinge_indices.size}.")
-            gap = float(np.max(np.abs(q0 - qpos[self.hinge_indices])))
+            start = q0[self._ramp_select]
+            gap = float(np.max(np.abs(start - qpos[self.ramp_indices])))
             self._ramp = JointRamp(
-                self.hinge_indices,
-                q0,
+                self.ramp_indices,
+                start,
                 duration_s=self.duration_s,
                 max_rate=self.max_rate,
                 now=now,
@@ -329,9 +397,12 @@ class ConvergeGate:
             trigger, self._pending = self._pending, None
             self.started += 1
             logger.warning(
-                "convergence ramp started (%s): max gap %.3f rad, %.2f rad/s cap, joints %s, root %s",
+                "convergence ramp started (%s): max gap %.3f rad over %d of %d joints, %.2f rad/s cap, joints %s, "
+                "root %s",
                 trigger,
                 gap,
+                self.ramp_indices.size,
+                self.hinge_indices.size,
                 self.max_rate,
                 "in step" if self.in_step else f"per joint ({self.duration_s:.1f} s smoothstep)",
                 "follows the ramp (feet-anchored)" if self._root is not None else "live",
@@ -388,14 +459,17 @@ class ConvergeGate:
 
 
 __all__ = [
+    "CONVERGE_JOINT_SETS",
     "DEFAULT_FOOT_BODIES",
     "DEFAULT_LOW_LEVEL_MODES",
     "TRIGGER_CONNECT",
     "TRIGGER_LOW_LEVEL",
     "TRIGGER_RESUME",
+    "UPPER_BODY_JOINT_KEYWORDS",
     "ConvergeGate",
     "ConvergeStatus",
     "FeetAnchoredRoot",
     "ResumeEdge",
+    "converge_qpos_indices",
     "low_level_modes_from_sdk",
 ]

@@ -11,7 +11,8 @@ Pipeline::
       -> NeckOverride                                               HMD-relative neck into qpos
       -> ArmHold                                                    arm joints frozen while the bare hand is untracked
       -> ConvergeGate (LowState + robotstate + VRS1 teleop_state)   ramp from the robot's measured pose on Start /
-                                                                    Resume / low-level entry, 31 hinges in qpos
+                                                                    Resume / low-level entry; arms and neck by
+                                                                    default, waist and legs live (--converge_joints)
       -> RetargetFramePayloadBuilder -> RetargetFrameRosPublisher   /gmr/teleop/retarget_frame (String, domain 91)
                                                                     -> igris_c_inference_node (ONNX WBC -> DDS lowcmd)
       -> HandTargets -> HandCmdDdsPublisher                         <ns>/handcmd (DDS HandCmd, fingers bypass the policy)
@@ -98,7 +99,13 @@ from ..retarget.retarget_frame import FREE_JOINT_QPOS_SIZE, RetargetFramePayload
 from ..ros.publisher import DEFAULT_ACTIVE_TOPIC, DEFAULT_NODE_NAME, DEFAULT_ROS_DOMAIN_ID, DEFAULT_ROS_TOPIC, RetargetFrameRosPublisher
 from ..shaping.anchor import OperatorFrameAnchor
 from ..shaping.arm_hold import SIDES, ArmHold
-from ..shaping.converge import ConvergeGate, ConvergeStatus, low_level_modes_from_sdk
+from ..shaping.converge import (
+    CONVERGE_JOINT_SETS,
+    ConvergeGate,
+    ConvergeStatus,
+    converge_qpos_indices,
+    low_level_modes_from_sdk,
+)
 from ..uplink.controller import ConnectionSessions, ControllerEvents
 from ..uplink.source_timing import SourceTick, SourceTimeline
 from ..uplink.walk import DEFAULT_DEADZONE, DEFAULT_MAX_LINEAR, DEFAULT_MAX_YAW_RATE, WALK_STOP, ThumbstickWalk
@@ -218,9 +225,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "in-step ramp; joints with small gaps arrive first).",
     )
     converge.add_argument(
+        "--converge_joints", choices=CONVERGE_JOINT_SETS, default="upper",
+        help="Joints the ramp shapes. upper (default): shoulders, elbows, wrists and neck; the waist and leg reference "
+        "follows the operator at once, without a ramp. all: every joint (the behaviour before 2026-11-26).",
+    )
+    converge.add_argument(
         "--no_converge_root", action="store_true",
         help="Leave the root pose (torso tilt and height) at the operator's live value while the joints ramp, instead of "
-        "recomputing it from the ramped joints with the feet kept on the live reference's feet.",
+        "recomputing it from the ramped joints with the feet kept on the live reference's feet. Only matters with "
+        "--converge_joints all: with upper no leg joint is ramped and the root is live anyway.",
     )
     converge.add_argument(
         "--no_resume_anchor", action="store_true",
@@ -340,11 +353,13 @@ def main(argv: list[str] | None = None) -> int:
         enabled=not args.no_converge and not args.no_dds,
         in_step=not args.converge_per_joint,
         model=None if args.no_converge_root else gmr.model,
+        ramp_indices=converge_qpos_indices(gmr.model, args.converge_joints),
     )
     anchor = OperatorFrameAnchor(enabled=not args.no_resume_anchor)
     logger.info(
         "GMR %s: nq=%d dof=%d keybodies=%d; neck override -> qpos%s (ranges %s); fingers=%s; arm hold %s (release after %.2f s, %.2f rad/s); "
-        "convergence ramp %s (%.1f s, %.2f rad/s cap, hand %.2f/s, LowState max age %.2f s, joints %s, root %s); resume anchor %s",
+        "convergence ramp %s (%s: %d of %d joints, %.1f s, %.2f rad/s cap, hand %.2f/s, LowState max age %.2f s, "
+        "joints %s, root %s); resume anchor %s",
         args.robot,
         builder.nq,
         builder.dof_count,
@@ -356,12 +371,15 @@ def main(argv: list[str] | None = None) -> int:
         args.arm_hold_release_s,
         args.arm_hold_release_rad_s,
         "on" if converge.enabled else ("off (--no_converge)" if args.no_converge else "off (needs DDS LowState; --no_dds)"),
+        args.converge_joints,
+        converge.ramp_indices.size,
+        converge.hinge_indices.size,
         args.converge_seconds,
         args.converge_max_rad_s,
         args.converge_hand_rate,
         args.lowstate_max_age,
         "per joint (--converge_per_joint)" if args.converge_per_joint else "in step",
-        "live (--no_converge_root)" if args.no_converge_root else "feet-anchored",
+        "feet-anchored" if converge.root_follows_ramp else "live",
         "on" if anchor.enabled else "off (--no_resume_anchor)",
     )
 
@@ -600,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 neck_yaw_pitch = neck.apply(qpos, head_relative_neck_angles(state))
 
-                # Reference shaping, in this order: arm hold (per side) then the convergence ramp (all hinges).
+                # Reference shaping, in this order: arm hold (per side) then the convergence ramp (--converge_joints).
                 holding = arm_hold.update(
                     qpos,
                     now=now,

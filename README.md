@@ -65,7 +65,12 @@ only thing between the operator and a joint jump. All are enabled by default.
 - **Convergence ramp** (`--no_converge` to disable). When teleoperation starts or resumes, or
   the robot enters low-level control, the reference is blended from the robot's measured joint
   pose to the operator's pose instead of jumping. The ramp is rate-capped (default 0.6 rad/s) and
-  ends as soon as every joint is close to the live reference.
+  ends as soon as every ramped joint is close to the live reference.
+  Since 2026-11-26 the ramp shapes the **upper body only** (`--converge_joints upper`, the
+  default): shoulders, elbows, wrists and neck, 16 of the 31 joints. The waist and leg reference
+  (15 joints) and the root pose follow the operator from the first frame: a posture change of
+  the lower body made while paused reaches the policy as a step. `--converge_joints all` ramps
+  every joint as before.
   Each ramp start or restart resets reference velocity estimation to avoid differentiating
   across the switch to measured joints. Root and joint velocities are zero for
   `--zero_velocity_frames` frames afterward (default 10: about 0.2 s at a headset record rate near
@@ -81,15 +86,16 @@ only thing between the operator and a joint jump. All are enabled by default.
   running (not with `--no_dds` or `--no_motion_feedback_dds`).
   The joints move in step: one blend sized by the largest gap, so that this joint peaks at the
   rate cap and all others reach the same fraction of their own gap at the same time (a large
-  posture change therefore takes longer than the cap alone would: about 4.4 s for a 84 deg knee
-  gap). `--converge_per_joint` restores the fixed `--converge_seconds` blend with each joint
-  capped on its own, where joints with small gaps arrive first and the torso passes through
-  postures that lie on neither side of the change.
-  While the ramp runs, the root pose (torso tilt and height) is recomputed from the ramped
-  joints with the feet kept where the live reference has its feet, so it starts at the pose
-  the robot is in and ends on the operator's root together with the joints.
-  `--no_converge_root` leaves the root at the operator's live value instead (it then steps at
-  the resume by the full tilt and height difference).
+  posture change therefore takes longer than the cap alone would: about 3.7 s for a 84 deg elbow
+  gap at the default cap). `--converge_per_joint` restores the fixed `--converge_seconds` blend
+  with each joint capped on its own, where joints with small gaps arrive first and the body
+  passes through postures that lie on neither side of the change.
+  Root pose: with the default `--converge_joints upper` no leg joint is ramped, so the root
+  (torso tilt and height) is the operator's live value throughout. With `--converge_joints all`
+  the root is recomputed while the ramp runs from the ramped joints with the feet kept where the
+  live reference has its feet, so it starts at the pose the robot is in and ends on the
+  operator's root together with the joints; `--no_converge_root` then leaves the root at the
+  operator's live value instead (it steps at the resume by the full tilt and height difference).
 - **Resume anchor** (`--no_resume_anchor` to disable). A turn or a walk made while paused is
   not passed to the retargeting: on every Start/Resume the operator's skeleton is rotated about
   the vertical axis and shifted horizontally, once, so that it continues with the heading (hip
@@ -242,9 +248,14 @@ Before the first use on hardware, and after bumping a submodule or the SDK wheel
    headset disconnect and resumes on reconnect.
 3. With torque off: hand command arrives on the bridge at 100 Hz; each controller button sends
    exactly one control-mode request per press.
-4. With torque on, safe posture: Pause the headset, move the arms away, Resume. The robot moves
+4. With torque on, safe posture: Pause the headset, move the arms away, Resume. The arms move
    smoothly to the operator's pose with no jump, and the HUD shows the converging indicator
    until the log reports `convergence ramp finished`.
+   Lower body, in MuJoCo before the robot: Pause, change the lower-body posture a little (bend
+   the knees, turn the waist), Resume. With the default `--converge_joints upper` the waist and
+   leg reference steps to the operator's posture at once; the robot must follow without losing
+   balance. Increase the posture difference stepwise, and use `--converge_joints all` if the
+   step is too much for the policy.
 5. Bare hands: cover one hand. That arm stays still while the rest follows; it ramps back
    smoothly after uncovering.
 6. Walk velocity, torque off first: with the headset Active, push each thumbstick axis and read
@@ -262,6 +273,7 @@ Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_fe
 Rollback of the resume handling to the joints-only ramp, each switch on its own:
 `--no_resume_anchor` (heading/position alignment), `--no_converge_root` (root follows the ramp),
 `--converge_per_joint` (joints in step).
+Rollback of the upper-body-only ramp to the whole-body ramp: `--converge_joints all`.
 Rollback of the viewer: `--no_viewer`.
 Rollback of the reference timing (one frame per headset record, headset-clock velocities,
 `session_id` / `source_*` in `record_meta`): `--no_source_timing`.

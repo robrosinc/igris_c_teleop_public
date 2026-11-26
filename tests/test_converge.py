@@ -338,3 +338,96 @@ def test_gate_ramps_in_step_by_default_and_per_joint_on_request():
     assert 3.2 < total < 3.7 and small > 0.8 * total  # both joints arrive together
     total, small = run(in_step=False)
     assert 2.3 < total < 2.6 and small < 1.0  # the small gap arrives first, the large one at the cap
+
+
+# -- joint sets: which hinges the ramp shapes ------------------------------------------
+
+
+def _joint_names(model, qpos_indices):
+    import mujoco as mj
+
+    by_address = {int(model.jnt_qposadr[j]): mj.mj_id2name(model, mj.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)}
+    return [by_address[int(index)] for index in qpos_indices]
+
+
+def test_upper_set_is_arms_and_neck(model):
+    from igris_c_teleop.shaping.converge import converge_qpos_indices
+
+    hinges = np.arange(7, model.nq)
+    assert np.array_equal(converge_qpos_indices(model, "all"), hinges)
+    upper = converge_qpos_indices(model, "upper")
+    names = _joint_names(model, upper)
+    assert len(names) == 16  # 2 x (3 shoulder + 1 elbow + 3 wrist) + 2 neck
+    assert all(any(part in name for part in ("Shoulder", "Elbow", "Wrist", "Neck")) for name in names)
+    left_out = _joint_names(model, np.setdiff1d(hinges, upper))
+    assert len(left_out) == 15
+    assert all(any(part in name for part in ("Waist", "Hip", "Knee", "Ankle")) for name in left_out)
+    with pytest.raises(ValueError):
+        converge_qpos_indices(model, "legs")
+
+
+def test_upper_set_ramps_the_upper_body_and_leaves_waist_legs_and_root_live(model, keyframe_qpos):
+    from igris_c_teleop.shaping.converge import converge_qpos_indices
+
+    hinges = np.arange(7, model.nq)
+    upper = converge_qpos_indices(model, "upper")
+    lower = np.setdiff1d(hinges, upper)
+    live = _legs(model, keyframe_qpos, hip=-0.6, knee=1.2, ankle=-0.6)  # operator in a squat ...
+    live[upper] += 0.3  # ... with the arms and neck 0.3 rad from the robot's
+    live[:3] += (0.2, -0.1, -0.15)
+    robot = keyframe_qpos.copy()  # robot standing
+    gate = ConvergeGate(hinges, duration_s=1.0, max_rate=0.5, model=model, ramp_indices=upper)
+    assert not gate.root_follows_ramp  # no ramped joint lies between the root and a foot
+
+    qpos = live.copy()
+    status = _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=(robot[hinges], 0.0), resume=1)
+    assert status.trigger == TRIGGER_RESUME and status.converging
+    assert np.allclose(qpos[upper], robot[upper])  # the upper body starts at the robot
+    assert np.array_equal(qpos[lower], live[lower])  # waist and legs: the operator's, from the first frame
+    assert np.array_equal(qpos[:7], live[:7])  # and so is the root
+
+    t = 0.0
+    while status.converging and t < 5.0:
+        t += 0.01
+        qpos = live.copy()
+        status = _tick(gate, qpos, t, state=TeleopState.RESUMING, lowstate=(robot[hinges], 0.0), resume=1)
+        assert np.array_equal(qpos[lower], live[lower]) and np.array_equal(qpos[:7], live[:7])
+    # The blend is sized by the largest gap among the ramped joints (0.3 rad), not by the 1.2 rad knee gap.
+    assert 0.8 < t < 1.2 and status.converged_resume_count == 1
+    assert np.allclose(qpos[upper], live[upper], atol=0.02)
+
+
+def test_upper_set_releases_at_once_when_only_the_lower_body_differs(model, keyframe_qpos):
+    from igris_c_teleop.shaping.converge import converge_qpos_indices
+
+    hinges = np.arange(7, model.nq)
+    live = _legs(model, keyframe_qpos, hip=-0.6, knee=1.2, ankle=-0.6)
+    gate = ConvergeGate(hinges, max_rate=0.5, model=model, ramp_indices=converge_qpos_indices(model, "upper"))
+    qpos = live.copy()
+    status = _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=(keyframe_qpos[hinges], 0.0), resume=3)
+    assert status.trigger == TRIGGER_RESUME and not status.converging and status.converged_resume_count == 3
+    assert np.array_equal(qpos, live)
+
+
+def test_root_follows_only_a_ramp_that_moves_the_feet(model):
+    from igris_c_teleop.shaping.converge import converge_qpos_indices
+
+    hinges = np.arange(7, model.nq)
+    names = _joint_names(model, hinges)
+    legs = hinges[[any(part in name for part in ("Hip", "Knee", "Ankle")) for name in names]]
+    assert ConvergeGate(hinges, model=model).root_follows_ramp  # all joints, as before
+    assert ConvergeGate(hinges, model=model, ramp_indices=legs).root_follows_ramp
+    assert not ConvergeGate(hinges, model=model, ramp_indices=converge_qpos_indices(model, "upper")).root_follows_ramp
+    assert not ConvergeGate(hinges, ramp_indices=legs).root_follows_ramp  # no model: the root is always live
+
+
+def test_ramp_indices_must_be_a_subset_of_the_hinges():
+    for bad in ([], [3], [7, 7]):
+        with pytest.raises(ValueError):
+            ConvergeGate(HINGES, ramp_indices=bad)
+    gate = _gate(ramp_indices=[9, 20])
+    qpos = _qpos(2.0)
+    lowstate = (np.arange(31, dtype=np.float64), 0.0)  # LowState slot i belongs to qpos index 7 + i
+    _tick(gate, qpos, 0.0, state=TeleopState.RESUMING, lowstate=lowstate)
+    assert qpos[9] == 2.0 and qpos[20] == 13.0  # each ramped joint starts at its own LowState value
+    assert np.allclose(np.delete(qpos[HINGES], [2, 13]), 2.0)  # the others are untouched
