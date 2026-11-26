@@ -15,6 +15,11 @@ class _FakeString:
         self.data = ""
 
 
+class _FakeBool:
+    def __init__(self):
+        self.data = False
+
+
 class _FakePublisher:
     def __init__(self, msg_type, topic, qos):
         self.msg_type, self.topic, self.qos = msg_type, topic, qos
@@ -67,9 +72,10 @@ def _fake_ros():
     ros = {
         "rclpy": SimpleNamespace(init=_init, create_node=_create_node, shutdown=_shutdown),
         "String": _FakeString,
+        "Bool": _FakeBool,
         "QoSProfile": _FakeQos,
         "ReliabilityPolicy": SimpleNamespace(RELIABLE="reliable", BEST_EFFORT="best_effort"),
-        "DurabilityPolicy": SimpleNamespace(VOLATILE="volatile"),
+        "DurabilityPolicy": SimpleNamespace(VOLATILE="volatile", TRANSIENT_LOCAL="transient_local"),
         "HistoryPolicy": SimpleNamespace(KEEP_LAST="keep_last"),
         "SignalHandlerOptions": SimpleNamespace(NO="no-handlers"),
     }
@@ -83,14 +89,20 @@ def test_publisher_contract_with_fake_rclpy():
     (node,) = calls["nodes"]
     assert node.name == "igris_c_teleop_producer"
     assert node.kwargs == {"enable_rosout": False, "start_parameter_services": False}
-    (pub,) = node.publishers
+    pub, active = node.publishers
     assert pub.topic == "/gmr/teleop/retarget_frame" and pub.msg_type is _FakeString
     assert pub.qos.kwargs == {"depth": 1, "history": "keep_last", "reliability": "reliable", "durability": "volatile"}
+    # Headset Active flag: latched (TRANSIENT_LOCAL) so a consumer that starts later still gets the current state.
+    assert active.topic == "/gmr/teleop/active" and active.msg_type is _FakeBool
+    assert active.qos.kwargs == {"depth": 1, "history": "keep_last", "reliability": "reliable", "durability": "transient_local"}
 
     publisher.publish('{"dof_pos":[[0.0]]}')
     publisher.publish("second")
     assert pub.messages == ['{"dof_pos":[[0.0]]}', "second"] and publisher.published == 2
     assert publisher.subscription_count() == 2
+    publisher.publish_active(True)
+    publisher.publish_active(False)
+    assert active.messages == [True, False] and publisher.published == 2  # the flag is not counted as a frame
     publisher.close()
     publisher.close()
     assert node.destroyed and calls["shutdown"] == 1
@@ -98,14 +110,18 @@ def test_publisher_contract_with_fake_rclpy():
 
 def test_publisher_custom_domain_topic_and_name():
     ros, calls = _fake_ros()
-    ros_publisher.RetargetFrameRosPublisher(domain_id=7, topic="/x/frame", node_name="probe", ros=ros)
+    ros_publisher.RetargetFrameRosPublisher(
+        domain_id=7, topic="/x/frame", active_topic="/x/active", node_name="probe", ros=ros
+    )
     assert calls["init"][1] == 7
-    assert calls["nodes"][0].name == "probe" and calls["nodes"][0].publishers[0].topic == "/x/frame"
+    (node,) = calls["nodes"]
+    assert node.name == "probe" and [pub.topic for pub in node.publishers] == ["/x/frame", "/x/active"]
 
 
 def test_defaults_match_inference_config():
     assert ros_publisher.DEFAULT_ROS_DOMAIN_ID == 91
     assert ros_publisher.DEFAULT_ROS_TOPIC == "/gmr/teleop/retarget_frame"
+    assert ros_publisher.DEFAULT_ACTIVE_TOPIC == "/gmr/teleop/active"
 
 
 @pytest.mark.ros

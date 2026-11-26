@@ -34,6 +34,29 @@ vr-link-stream (vr_link)   robot camera + robot state  ──>  headset   (start
 Source layout follows the pipeline (`source/igris_c_teleop/`): `uplink` (headset input),
 `retarget`, `shaping`, `ros` / `dds` (outputs), `app` (entry points).
 
+## Reference timing
+
+The headset sends pose records at its own frame rate (about 52 Hz with 13 to 28 ms gaps in a
+2026-11 capture), below the 100 Hz loop (`--target_fps`). Since 2026-11-26 the reference frame
+follows the headset, not the loop (`--no_source_timing` restores the previous behaviour):
+
+- A record is retargeted and published **once**. A loop tick that finds no new record publishes
+  no reference frame, so `/gmr/teleop/retarget_frame` runs at the headset's record rate.
+- Reference velocities are differences over the **headset timestamps** of two records, not over
+  the loop period.
+- `record_meta` carries `session_id` (one per producer run), `source_timestamp_ns` (the record's
+  headset clock) and `source_session_id` (one per continuous headset clock: it changes on every
+  reconnection and when that clock steps backwards). The inference node
+  (`igris_c_inference_public`) places the frames on its history timeline by
+  `source_timestamp_ns` and resamples them at the policy rate.
+- The DDS outputs (hand command, `cmd_vel`, controller relay, motion feedback) keep the loop rate.
+- A headset that sends no new record for longer than the inference node's `stale_after_ms`
+  (default 100) makes the node hold its reference and, on the next record, rebuild its history
+  and re-align the heading to the robot. Before, the producer kept publishing the last pose until
+  `--stale_timeout` (0.5 s) and the node saw no interruption.
+
+A sender without `timestamp_ns` (0) is handled as before: every tick, host clock.
+
 ## Reference shaping
 
 The policy applies the reference without any rate limit of its own, so these stages are the
@@ -41,11 +64,12 @@ only thing between the operator and a joint jump. All are enabled by default.
 
 - **Convergence ramp** (`--no_converge` to disable). When teleoperation starts or resumes, or
   the robot enters low-level control, the reference is blended from the robot's measured joint
-  pose to the operator's pose instead of jumping. The ramp is rate-capped (default 0.5 rad/s) and
+  pose to the operator's pose instead of jumping. The ramp is rate-capped (default 0.6 rad/s) and
   ends as soon as every joint is close to the live reference.
   Each ramp start or restart resets reference velocity estimation to avoid differentiating
   across the switch to measured joints. Root and joint velocities are zero for
-  `--zero_velocity_frames` samples afterward (default 10, about 100 ms at 100 Hz).
+  `--zero_velocity_frames` frames afterward (default 10: about 0.2 s at a headset record rate near
+  50 Hz, 0.1 s with `--no_source_timing`).
   A ramp always starts from a fresh `LowState` (`--lowstate_max_age`, default 0.5 s). When none
   is there at that moment the producer waits: it holds the last reference and hand command it
   published (on a first start it publishes nothing) and starts the ramp when one arrives; the
@@ -210,9 +234,12 @@ bridge and the inference node actually use before trusting a silent run.
 Before the first use on hardware, and after bumping a submodule or the SDK wheel:
 
 1. `pixi run check-env`, `pixi run test`, `pixi run test-ros` pass.
-2. With a live headset in **Active**: `ros2 topic hz /gmr/teleop/retarget_frame` reports about
-   100 Hz (`ROS_DOMAIN_ID=91`); the inference node reports ready within 5 s of starting. Publishing
-   stops on headset disconnect and resumes on reconnect.
+2. With a live headset in **Active**: `ros2 topic hz /gmr/teleop/retarget_frame` reports the
+   headset's record rate (`ROS_DOMAIN_ID=91`; about 52 Hz in a 2026-11 capture, 100 Hz with
+   `--no_source_timing`), and `--measure_fps` prints the same number as `solve` next to
+   `loop 100 Hz`. The inference node reports ready within 5 s of starting and its
+   `[Reference timing]` log shows no `STOPPED` while the headset streams. Publishing stops on
+   headset disconnect and resumes on reconnect.
 3. With torque off: hand command arrives on the bridge at 100 Hz; each controller button sends
    exactly one control-mode request per press.
 4. With torque on, safe posture: Pause the headset, move the arms away, Resume. The robot moves
@@ -225,7 +252,8 @@ Before the first use on hardware, and after bumping a submodule or the SDK wheel
    left gives +vy, right left gives +yaw rate, release gives 0, Pause sends one 0 and then
    nothing. Only then, in walk mode with torque on and a clear floor, at the default maxima.
 7. Viewer (opens by default), on each PC that runs the session, torque off first: with
-   `--measure_fps` the log still reports about 100 Hz and the same IK time as with `--no_viewer`,
+   `--measure_fps` the log still reports `loop` about 100 Hz and the same `solve` rate and IK time
+   as with `--no_viewer`,
    and the viewer cost stays far below the 10 ms tick (dev PC: 0.4 ms avg, below 1 ms max).
 
 Rollback to the unshaped reference: `--no_converge --arm_hold off --no_motion_feedback_dds`
@@ -235,6 +263,8 @@ Rollback of the resume handling to the joints-only ramp, each switch on its own:
 `--no_resume_anchor` (heading/position alignment), `--no_converge_root` (root follows the ramp),
 `--converge_per_joint` (joints in step).
 Rollback of the viewer: `--no_viewer`.
+Rollback of the reference timing (one frame per headset record, headset-clock velocities,
+`session_id` / `source_*` in `record_meta`): `--no_source_timing`.
 
 ## Submodules
 

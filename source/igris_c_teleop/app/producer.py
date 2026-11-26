@@ -4,6 +4,9 @@ Pipeline::
 
     headset (vr_system pawn, VRS1 FlatBuffers over TCP, this host :9102)
       -> vr_link.TcpVRDevice (gmr joint convention adapter)
+      -> SourceTimeline (--no_source_timing)                        the steps down to the ROS frame run once per new
+                                                                    headset record, timed on the headset clock; the DDS
+                                                                    outputs below keep the loop rate (--target_fps)
       -> GeneralMotionRetargeting(xrobot -> robros_igris_c_v2)      body IK, 38 qpos
       -> NeckOverride                                               HMD-relative neck into qpos
       -> ArmHold                                                    arm joints frozen while the bare hand is untracked
@@ -63,6 +66,7 @@ import logging
 import math
 import signal
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -96,6 +100,7 @@ from ..shaping.anchor import OperatorFrameAnchor
 from ..shaping.arm_hold import SIDES, ArmHold
 from ..shaping.converge import ConvergeGate, ConvergeStatus, low_level_modes_from_sdk
 from ..uplink.controller import ConnectionSessions, ControllerEvents
+from ..uplink.source_timing import SourceTick, SourceTimeline
 from ..uplink.walk import DEFAULT_DEADZONE, DEFAULT_MAX_LINEAR, DEFAULT_MAX_YAW_RATE, WALK_STOP, ThumbstickWalk
 from ..uplink.vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
 from .viewer import DEFAULT_VIEWER_FPS, ReferenceViewer
@@ -118,7 +123,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     retarget = parser.add_argument_group("retargeting")
     retarget.add_argument("--robot", type=str, default=DEFAULT_ROBOT, help="GMR target robot.")
     retarget.add_argument("--actual_human_height", type=float, default=1.65, help="Operator height passed to GMR (m).")
-    retarget.add_argument("--target_fps", type=float, default=100.0, help="Retarget/publish rate (Hz).")
+    retarget.add_argument(
+        "--target_fps", type=float, default=100.0,
+        help="Loop rate (Hz): the headset is polled and the DDS outputs are written at this rate. The reference "
+        "frame is retargeted and published once per new headset record (see --no_source_timing).",
+    )
+    retarget.add_argument(
+        "--no_source_timing", action="store_true",
+        help="Timing as before 2026-11-26: retarget and publish the newest record on every loop tick, velocities "
+        "from the host clock, no session_id / source_timestamp_ns / source_session_id in record_meta.",
+    )
     retarget.add_argument("--velocity_lpf_hz", type=float, default=8.0, help="First-order LPF cutoff for published velocities; 0 disables.")
     retarget.add_argument("--zero_velocity_frames", type=int, default=10, help="Frames after (re)connection that publish zero velocities.")
     retarget.add_argument("--invert_neck_yaw", action="store_true", help="Negate the HMD-derived neck yaw before publishing.")
@@ -239,14 +253,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _build_reference_payload(
-    builder: RetargetFramePayloadBuilder, qpos: np.ndarray, now: float, status: ConvergeStatus
+    builder: RetargetFramePayloadBuilder,
+    qpos: np.ndarray,
+    now: float,
+    status: ConvergeStatus,
+    tick: SourceTick | None = None,
+    session_id: str | None = None,
 ) -> str:
     # A ramp starts at measured joints, potentially jumping from the previous
     # reference. Do not differentiate across that replacement. Reset only on
     # the start edge so velocity feedback resumes while the ramp continues.
     if status.trigger is not None:
         builder.reset()
-    return to_ros_payload(builder.build(qpos, now))
+    if tick is None or tick.source_ns is None:
+        return to_ros_payload(builder.build(qpos, now))
+    # One source_session_id per continuous headset clock: the consumer restarts its history when it changes.
+    return to_ros_payload(
+        builder.build(qpos, now, source_timestamp_ns=tick.source_ns, source_session_id=f"{session_id}:{tick.segment}")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -271,12 +295,16 @@ def main(argv: list[str] | None = None) -> int:
         actual_human_height=args.actual_human_height,
         verbose=False,
     )
+    # Reference timing: one frame per new headset record, on the headset clock (uplink/source_timing.py).
+    timeline = SourceTimeline(enabled=not args.no_source_timing)
+    frame_session_id = uuid.uuid4().hex if timeline.enabled else None  # record_meta.session_id of this run
     builder = RetargetFramePayloadBuilder(
         gmr.model,
         robot_name=args.robot,
         target_fps=args.target_fps,
         velocity_lpf_hz=velocity_lpf_hz,
         zero_velocity_frames=args.zero_velocity_frames,
+        session_id=frame_session_id,
     )
     neck = NeckOverride(
         gmr.model,
@@ -464,6 +492,13 @@ def main(argv: list[str] | None = None) -> int:
         last_teleop_state = None
         last_active = False
         walk_command = WALK_STOP
+        # Results of the last retargeted record. A tick that polls the same record again re-uses them for the DDS
+        # outputs; status None forces a retarget (first tick after a (re)connection).
+        status: ConvergeStatus | None = None
+        qpos = None
+        neck_yaw_pitch = None
+        holding = (False, False)
+        window_ticks = 0
 
         while not stop:
             state = device.advance(0.0)
@@ -510,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
                 arm_hold.reset()
                 converge.reset()
                 anchor.reset()
+                timeline.reset()
+                status = None
                 last_teleop_state = None
                 if hold_arbiter is not None:
                     hold_arbiter.reset()
@@ -526,18 +563,21 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             now = time.time()
-            ik_start = time.perf_counter()
-            # A Start/Resume keeps the operator's heading and position where the last retargeted skeleton had them
-            # (one rigid horizontal transform, re-fixed on the resume edge), so the reference shows no jump for a
-            # turn or a walk made while paused. Posture differences are left to the convergence ramp below.
-            human = anchor.update(build_human_data(state), teleop_state=state.teleop_state, resume_count=state.resume_count)
-            qpos = gmr.retarget(human, offset_to_ground=True)
-            ik_seconds = time.perf_counter() - ik_start
+            # The headset sends at its own frame rate, below the loop rate: most ticks poll the record of the previous
+            # tick again. Only a new record is retargeted, shaped and published as a reference frame (its velocities
+            # are differenced on the headset clock); the DDS outputs keep the loop rate on every tick.
+            tick = timeline.update(getattr(state, "source_timestamp_ns", 0))
+            fresh = tick.fresh or status is None
+            if connected_edge:
+                logger.info(
+                    "reference timing: %s",
+                    "one frame per headset record, velocities on the headset clock"
+                    if tick.source_ns is not None
+                    else "every loop tick on the host clock (%s)"
+                    % ("--no_source_timing" if not timeline.enabled else "the sender provides no timestamp_ns"),
+                )
 
-            neck_yaw_pitch = neck.apply(qpos, head_relative_neck_angles(state))
             hand_values = hands.update(state)
-
-            # Reference shaping, in this order: arm hold (per side) then the convergence ramp (all hinges).
             if hands.enabled:
                 hand_sources = dict(zip(SIDES, hands.active_sources))
             else:
@@ -545,21 +585,37 @@ def main(argv: list[str] | None = None) -> int:
                     "left": hold_arbiter.decide("left", state.left_hand, state.left_input),
                     "right": hold_arbiter.decide("right", state.right_hand, state.right_input),
                 }
-            holding = arm_hold.update(
-                qpos,
-                now=now,
-                requests={side: ArmHold.hold_requested(state, side, hand_sources[side]) for side in SIDES},
-            )
-            mode_sample = mode_dds.latest() if mode_dds is not None else None
-            status = converge.update(
-                qpos,
-                now=now,
-                teleop_state=state.teleop_state,
-                connected_edge=connected_edge,
-                robot_mode=mode_sample[0] if mode_sample is not None else None,
-                lowstate=lowstate_dds.latest() if lowstate_dds is not None else None,
-                resume_count=state.resume_count,
-            )
+
+            if fresh:
+                ik_start = time.perf_counter()
+                # A Start/Resume keeps the operator's heading and position where the last retargeted skeleton had them
+                # (one rigid horizontal transform, re-fixed on the resume edge), so the reference shows no jump for a
+                # turn or a walk made while paused. Posture differences are left to the convergence ramp below.
+                human = anchor.update(
+                    build_human_data(state), teleop_state=state.teleop_state, resume_count=state.resume_count
+                )
+                qpos = gmr.retarget(human, offset_to_ground=True)
+                window_ik_seconds += time.perf_counter() - ik_start
+                window_count += 1
+
+                neck_yaw_pitch = neck.apply(qpos, head_relative_neck_angles(state))
+
+                # Reference shaping, in this order: arm hold (per side) then the convergence ramp (all hinges).
+                holding = arm_hold.update(
+                    qpos,
+                    now=now,
+                    requests={side: ArmHold.hold_requested(state, side, hand_sources[side]) for side in SIDES},
+                )
+                mode_sample = mode_dds.latest() if mode_dds is not None else None
+                status = converge.update(
+                    qpos,
+                    now=now,
+                    teleop_state=state.teleop_state,
+                    connected_edge=connected_edge,
+                    robot_mode=mode_sample[0] if mode_sample is not None else None,
+                    lowstate=lowstate_dds.latest() if lowstate_dds is not None else None,
+                    resume_count=state.resume_count,
+                )
             # While a trigger waits for a fresh LowState, qpos is the held reference and the hand command the held one
             # (None, like the frame below, when there is no earlier output to hold).
             hand_values = converge.shape_hand(hand_values, now)
@@ -588,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
                     if now - last_dds_error_log > 2.0:
                         logger.warning("HandCmd DDS publish failed: %s", exc)
                         last_dds_error_log = now
-            if ref_dds is not None and status.publish:
+            if fresh and ref_dds is not None and status.publish:
                 # After the neck override so the headset's FK sees the same neck the policy is told.
                 try:
                     ref_dds.publish(qpos[FREE_JOINT_QPOS_SIZE:], now)
@@ -607,20 +663,19 @@ def main(argv: list[str] | None = None) -> int:
                         logger.warning("Controller relay DDS publish failed: %s", exc)
                         last_dds_error_log = now
 
-            if status.publish:
+            if fresh and status.publish:
                 try:
-                    ros.publish(_build_reference_payload(builder, qpos, now, status))
+                    ros.publish(_build_reference_payload(builder, qpos, now, status, tick, frame_session_id))
                 except Exception as exc:
                     if now - last_ros_error_log > 2.0:
                         logger.warning("ROS frame publish failed: %s", exc)
                         last_ros_error_log = now
 
-            if viewer is not None:
+            if fresh and viewer is not None:
                 # After every output of the tick. Decimated, never raises; turns itself off on a closed window.
                 viewer.update(qpos, gmr.scaled_human_data)
 
-            window_count += 1
-            window_ik_seconds += ik_seconds
+            window_ticks += 1
             if args.measure_fps:
                 elapsed = time.monotonic() - window_start
                 if elapsed >= 2.0:
@@ -678,8 +733,10 @@ def main(argv: list[str] | None = None) -> int:
                         else:
                             viewer_text = ", viewer off"
                     logger.info(
-                        "solve %.1f Hz, IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s%s%s",
+                        # solve = headset records retargeted (the headset's record rate); loop = poll / DDS rate.
+                        "solve %.1f Hz (loop %.1f Hz), IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s%s%s",
                         window_count / elapsed,
+                        window_ticks / elapsed,
                         1e3 * window_ik_seconds / max(1, window_count),
                         ros.published,
                         ros.subscription_count(),
@@ -691,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     window_start = time.monotonic()
                     window_count = 0
+                    window_ticks = 0
                     window_ik_seconds = 0.0
             rate.sleep()
     finally:

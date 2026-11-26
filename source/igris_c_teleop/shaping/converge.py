@@ -184,7 +184,7 @@ class ConvergeGate:
         hinge_indices,
         *,
         duration_s: float = 1.0,
-        max_rate: float = 0.5,
+        max_rate: float = 0.6,
         hand_rate: float = 1.0,
         lowstate_max_age_s: float = 0.5,
         low_level_modes: frozenset[int] = DEFAULT_LOW_LEVEL_MODES,

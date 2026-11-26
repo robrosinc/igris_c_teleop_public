@@ -97,10 +97,20 @@ def to_ros_payload(frame: dict[str, Any]) -> str:
 class RetargetFramePayloadBuilder:
     """Builds one contract frame dict per retargeted MuJoCo qpos.
 
-    Velocities are wall-clock finite differences against the previously built
-    frame, zero for the first ``zero_velocity_frames`` frames after ``reset``,
-    then optionally smoothed with a first-order low-pass filter (same
-    ``alpha = dt / (tau + dt)`` as GMR).
+    Velocities are finite differences against the previously built frame, zero
+    for the first ``zero_velocity_frames`` frames after ``reset``, then
+    optionally smoothed with a first-order low-pass filter (same
+    ``alpha = dt / (tau + dt)`` as GMR). The time step is the difference of the
+    sender timestamps when ``build`` gets one (``source_timestamp_ns``: the
+    headset record's own clock, so an irregular record rate does not distort
+    the velocities), else of the host times ``now``.
+
+    ``record_meta`` carries, besides ``frame_idx`` and ``unix_ms`` (host
+    publication time): ``session_id`` (one per producer run, when given) and,
+    for a frame built with a sender timestamp, ``source_timestamp_ns`` and
+    ``source_session_id`` (one per continuous sender clock). The consumer
+    places the frames on its history timeline by ``source_timestamp_ns`` and
+    starts a new history when either id changes.
     """
 
     def __init__(
@@ -112,6 +122,7 @@ class RetargetFramePayloadBuilder:
         velocity_lpf_hz: float | None = None,
         zero_velocity_frames: int = 10,
         source_tag: str = DEFAULT_SOURCE_TAG,
+        session_id: str | None = None,
     ) -> None:
         import mujoco as mj
         from general_motion_retargeting.utils.motion_utils import get_default_keybody_names
@@ -131,6 +142,7 @@ class RetargetFramePayloadBuilder:
         self._velocity_lpf_hz = velocity_lpf_hz
         self._zero_velocity_frames = int(zero_velocity_frames)
         self._source_tag = str(source_tag)
+        self._session_id = str(session_id) if session_id else None
 
         body_ids: list[int] = []
         body_names: list[str] = []
@@ -152,6 +164,7 @@ class RetargetFramePayloadBuilder:
         self.frame_idx = 0
         self._prev_qpos: np.ndarray | None = None
         self._prev_time: float | None = None
+        self._prev_source: tuple[str, int] | None = None  # (source_session_id, source_timestamp_ns) of the last frame
         self._frames_since_reset = 0
         self._lpf_state: dict[str, np.ndarray] = {}
 
@@ -164,11 +177,25 @@ class RetargetFramePayloadBuilder:
 
         self._prev_qpos = None
         self._prev_time = None
+        self._prev_source = None
         self._frames_since_reset = 0
         self._lpf_state = {}
 
-    def build(self, qpos: np.ndarray, now: float | None = None) -> dict[str, Any]:
-        """Return the JSON-able contract frame for ``qpos`` (``model.nq`` values)."""
+    def build(
+        self,
+        qpos: np.ndarray,
+        now: float | None = None,
+        *,
+        source_timestamp_ns: int | None = None,
+        source_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the JSON-able contract frame for ``qpos`` (``model.nq`` values).
+
+        ``source_timestamp_ns`` is the sender clock of the record ``qpos`` was
+        retargeted from and ``source_session_id`` names that clock; give both or
+        neither. With them the velocities are differenced on the sender clock,
+        and only against a previous frame of the same ``source_session_id``.
+        """
 
         from general_motion_retargeting.rot_utils import quat_diff_np
         from general_motion_retargeting.utils.motion_utils import build_motion_data
@@ -179,6 +206,13 @@ class RetargetFramePayloadBuilder:
         if not np.all(np.isfinite(qpos)):
             raise ValueError("qpos contains non-finite values.")
         now = time.time() if now is None else float(now)
+        source: tuple[str, int] | None = None
+        if source_timestamp_ns is not None or source_session_id is not None:
+            if source_timestamp_ns is None or not source_session_id:
+                raise ValueError("source_timestamp_ns and source_session_id must be given together.")
+            if int(source_timestamp_ns) <= 0:
+                raise ValueError(f"source_timestamp_ns must be positive, got {source_timestamp_ns}.")
+            source = (str(source_session_id), int(source_timestamp_ns))
 
         self._data.qpos[:] = qpos
         self._mj.mj_forward(self._model, self._data)
@@ -203,7 +237,13 @@ class RetargetFramePayloadBuilder:
         zero_velocity = self._frames_since_reset < self._zero_velocity_frames
         dt: float | None = None
         if not zero_velocity and self._prev_qpos is not None and self._prev_time is not None:
-            dt = now - self._prev_time
+            if source is None and self._prev_source is None:
+                dt = now - self._prev_time
+            elif source is not None and self._prev_source is not None and source[0] == self._prev_source[0]:
+                # Integer difference first: a ns stamp near 1e18 does not fit a float64 exactly.
+                dt = (source[1] - self._prev_source[1]) * 1e-9
+            else:
+                dt = -1.0  # the time base changed (other sender clock, or host <-> sender): no common step
             if dt > 1e-6:
                 prev = self._prev_qpos
                 root_vel[0] = (qpos[:3] - prev[:3]) / dt
@@ -218,15 +258,22 @@ class RetargetFramePayloadBuilder:
 
         self._prev_qpos = qpos.copy()
         self._prev_time = now
+        self._prev_source = source
         self._frames_since_reset += 1
 
-        motion_data["record_meta"] = {
+        record_meta: dict[str, Any] = {
             "source": self._source_tag,
             "robot": self._robot_name,
             "frame_idx": int(self.frame_idx),
             "unix_ms": int(time.time() * 1000),
             "fps": self._target_fps,
         }
+        if self._session_id is not None:
+            record_meta["session_id"] = self._session_id
+        if source is not None:
+            record_meta["source_timestamp_ns"] = source[1]
+            record_meta["source_session_id"] = source[0]
+        motion_data["record_meta"] = record_meta
         self.frame_idx += 1
         return jsonable({key: motion_data[key] for key in CONTRACT_KEYS})
 
