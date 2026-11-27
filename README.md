@@ -143,9 +143,8 @@ each axis to +-1 and its walk policy adds its own deadband and filter. The strea
 producer rate while Active; one zero command is sent when the headset pauses, the skeleton is lost
 or the producer exits, and nothing is sent while paused (the controller also zeroes the command
 after 500 ms without a sample). The axis signs follow the VRS1 thumbstick convention (+x right,
-+y forward) and have not been verified on the headset yet: check them with torque off
-(`--measure_fps` logs the command) and flip with `--walk_invert_lateral` / `--walk_invert_yaw`
-if needed.
++y forward) and are verified on the headset; `--walk_invert_lateral` / `--walk_invert_yaw` flip
+an axis if a setup needs it (`--measure_fps` logs the command).
 
 ## Setup
 
@@ -208,19 +207,24 @@ producer publishes nothing until a headset skeleton is connected.
    separate repository: see [igris_c_inference_public](https://github.com/robrosinc/igris_c_inference_public)
    for its setup, configuration and run commands.
 
-Other ways to run:
+Teleoperation without vision feedback (pass-through): run the same `teleop` session and check
+**NO CAMERA** on the headset's connect page. The headset shows the room in pass-through, and
+`vr-link-stream` keeps sending the state records (`Signals`, robot state) without video. The
+session has to be `teleop` in this case too: the headset leaves Resuming for Active only when
+the producer's resume acknowledgement arrives through `vr-link-stream`.
+
+The producer alone, for development and debugging:
 
 ```bash
-pixi run producer -- --dds_namespace igris_c_<unit> --dds_domain_id <id> --ros_domain_id <id>   # producer only, no video downlink
+pixi run producer -- --dds_namespace igris_c_<unit> --dds_domain_id <id> --ros_domain_id <id>   # producer only, nothing sent back to the headset
 pixi run producer -- --help                                                                     # all options
 ```
 
-`producer` runs the retargeting pipeline alone, without `vr-link-stream`: nothing is sent back to
-the headset, so teleop is a pass-through without vision feedback. It takes the same `--target`
-(default `robot`) and publishes the reference frame by the table above. Start `vr_system` with
-**NO CAMERA** checked in this mode. The convergence ramp and arm hold still run on the robot
-side; only their HUD indicators (and the robot state overlay) are missing, because those reach
-the headset through `vr-link-stream`.
+`producer` runs the retargeting pipeline alone, without `vr-link-stream`. It takes the same
+`--target` (default `robot`) and publishes the reference frame by the table above. It cannot
+run a live session with `vr_system` v2.2.0 or newer: nothing is sent back to the headset, so the
+headset stays in Resuming (HUD `WAITING LINK`) and never becomes Active, with or without
+NO CAMERA. Use it to debug the producer or to replay a recording (`--replay_vrs1 <file>.vrs1`).
 
 Useful options: `--no_dds` (ROS output only), `--dds_topic_naming native|ros_compatible` (must
 match the robot's transport setting), `--measure_fps` (loop statistics in the log).
