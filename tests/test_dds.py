@@ -121,6 +121,22 @@ class _FakeMasterArmState:
         self.joints = list(joints)
 
 
+class _FakeJoy:
+    def __init__(self):
+        self.header_value = None
+        self.axes_value = None
+        self.buttons_value = None
+
+    def header(self, value):
+        self.header_value = value
+
+    def axes(self, values):
+        self.axes_value = list(values)
+
+    def buttons(self, values):
+        self.buttons_value = list(values)
+
+
 class _FakeChannel:
     def __init__(self):
         self.init_args = None
@@ -253,12 +269,14 @@ def _fake_sdk(legacy_names: bool = False):
     fields = dict(
         ChannelFactory=_ChannelFactory,
         HandCmdPublisher=_publisher,
+        JoyPublisher=_publisher,
         MasterArmStatePublisher=_publisher,
         TwistStampedPublisher=_publisher,
         TwistStamped=_FakeTwistStamped,
         LowStateSubscriber=_subscriber,
         RobotStateSubscriber=_subscriber,
         subscribers=subscribers,
+        Joy=_FakeJoy,
         MasterArmState=_FakeMasterArmState,
         JointState=_FakeJointState,
         Header=_FakeHeader,
@@ -299,6 +317,16 @@ def test_channel_init_resolve_release():
 
     ros_compat = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", topic_naming="ros_compatible", sdk=sdk)
     assert ros_compat.resolve("handcmd") == "rt/igris_c_IG07/handcmd"
+    loopback = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_999", interface="lo", sdk=sdk)
+    assert '<NetworkInterface name="lo" autodetermine="false"/>' in channel.init_args[2]
+    assert "<DontRoute>true</DontRoute>" in channel.init_args[2]
+    loopback.release()
+    nic = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", interface="enp3s0", sdk=sdk)
+    assert '<NetworkInterface name="enp3s0" autodetermine="false"/>' in channel.init_args[2]
+    assert "<DontRoute>" not in channel.init_args[2]
+    nic.release()
+    with pytest.raises(ValueError):
+        dds_io.cyclonedds_xml('lo"><bad')
     with pytest.raises(ValueError):
         dds_io.DdsChannel.create(domain_id=0, namespace="", sdk=sdk)
     with pytest.raises(ValueError):
@@ -513,3 +541,51 @@ def test_robot_mode_subscriber_keeps_the_newest_mode():
     assert reader.errors == 1 and reader.latest()[0] == 3
     reader.close()
     assert fake.stops == 1
+
+
+# -- whole-body retarget reference publisher ---------------------------------------
+
+
+def test_retarget_frame_publisher_encodes_frames_and_active_transitions():
+    sdk, _channel, publishers = _fake_sdk()
+    dds = dds_io.DdsChannel.create(domain_id=0, namespace="igris_c_IG07", sdk=sdk)
+    retarget = dds_io.RetargetFrameDdsPublisher(dds)
+    assert retarget.topic == dds_io.DEFAULT_RETARGET_TOPIC == "teleop/retarget_frame"
+    assert retarget.resolved_topic == "igris_c_IG07/teleop/retarget_frame"
+    assert len(publishers) == 1 and publishers[0].topic == "teleop/retarget_frame" and publishers[0].qos == "sensor-data"
+
+    retarget.publish_active(False, stamp=10.5)
+    assert retarget.active_published == 1 and retarget.published == 0
+    active_msg = publishers[0].written[-1]
+    assert active_msg.header_value.frame == dds_io.RETARGET_ACTIVE_TAG
+    assert active_msg.axes_value == [] and active_msg.buttons_value == [0, 0]
+
+    frame = {
+        "fps": 100.0,
+        "dof_pos": [np.linspace(-0.5, 0.5, 31).tolist()],
+        "dof_vel": [np.linspace(-1.0, 1.0, 31).tolist()],
+        "root_rot": [[1.0, 0.0, 0.0, 0.0]],
+        "link_body_list": ["Left_Hand", "Right_Hand"],
+        "keybody_rot_local": [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]],
+        "keybody_pos_local": [[[0.2, 0.1, 0.0], [0.2, -0.1, 0.0]]],
+        "root_pos": [[0.0, 0.0, 0.95]],
+        "root_vel": [[0.1, 0.0, 0.0]],
+        "root_angvel": [[0.0, 0.0, 0.3]],
+    }
+    retarget.publish(frame, active=True, stamp=11.25)
+    assert retarget.published == 1
+    msg = publishers[0].written[-1]
+    assert msg.header_value.frame == f"{dds_io.RETARGET_FRAME_TAG}:Left_Hand,Right_Hand"
+    expected_flags = (
+        dds_io.FLAG_KEYBODY_POS_LOCAL | dds_io.FLAG_ROOT_POS | dds_io.FLAG_ROOT_VEL | dds_io.FLAG_ROOT_ANGVEL
+    )
+    assert msg.buttons_value == [1, 1, 2, expected_flags]
+    assert len(msg.axes_value) == 1 + 31 + 31 + 4 + 8 + 6 + 3 + 3 + 3
+    assert msg.axes_value[0] == pytest.approx(100.0)
+    assert msg.axes_value[1:32] == pytest.approx(frame["dof_pos"][0])
+
+    bad = dict(frame, dof_pos=[[float("nan")] * 31])
+    with pytest.raises(ValueError, match="non-finite"):
+        retarget.publish(bad, active=True, stamp=12.0)
+    retarget.close()
+    assert publishers[0].stops == 1

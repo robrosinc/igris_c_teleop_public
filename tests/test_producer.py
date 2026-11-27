@@ -36,8 +36,15 @@ def test_defaults_match_port_plan():
     args = producer.parse_args([])
     assert args.pose_port == 9102 and args.stale_timeout == 0.5
     assert args.finger_source == "auto" and args.target_fps == 100.0
+    # The target fixes the reference transport (app/targets.py): ROS 2 unless isaac. No per-transport switch exists.
+    assert args.target == "robot" and producer.parse_args(["--target", "isaac"]).target == "isaac"
     assert args.ros_domain_id == 91 and args.ros_topic == "/gmr/teleop/retarget_frame"
-    assert not args.no_dds and args.dds_domain_id == 0 and args.dds_namespace is None
+    assert not args.no_dds and args.dds_domain_id == 0 and args.dds_namespace is None and args.dds_interface is None
+    assert producer.parse_args(["--dds_interface", "lo"]).dds_interface == "lo"
+    assert args.retarget_dds_topic == "teleop/retarget_frame"
+    for removed_flag in ("--no_ros", "--no_retarget_dds"):
+        with pytest.raises(SystemExit):
+            producer.parse_args([removed_flag])
     assert args.dds_topic_naming == "native" and args.hand_dds_topic == "handcmd"
     assert args.control_mode_timeout_ms == 3000
     assert not args.no_mode_events and args.replay_vrs1 is None
@@ -63,6 +70,11 @@ def test_controller_relay_uses_the_vr_link_contract():
 def test_dds_namespace_is_required_unless_no_dds():
     with pytest.raises(SystemExit, match="dds_namespace"):
         producer.main([])
+    # isaac takes the reference from CycloneDDS, so it has no ROS-only session.
+    with pytest.raises(SystemExit, match="--target isaac"):
+        producer.main(["--target", "isaac", "--no_dds"])
+    with pytest.raises(SystemExit, match="retarget_dds_topic"):
+        producer.main(["--target", "isaac", "--dds_namespace", "igris_c_IG01", "--retarget_dds_topic", ""])
     with pytest.raises(SystemExit, match="finger source"):
         producer.main(["--dds_namespace", "igris_c_IG01", "--finger_source", "none"])
     with pytest.raises(SystemExit, match="target_fps"):

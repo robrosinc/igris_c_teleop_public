@@ -184,6 +184,17 @@ producer publishes nothing until a headset skeleton is connected.
    as two supervised processes. `--target` selects the frame source: `robot`, `usb`, `mujoco`,
    `isaac` or `shm`. Extra arguments are passed to the producer.
 
+   `--target` also fixes how the reference frame is published, for `teleop` and `producer` alike:
+
+   | `--target` | Reference frame | Consumer |
+   |---|---|---|
+   | `robot`, `usb`, `mujoco`, `shm` | ROS 2 `/gmr/teleop/retarget_frame` | inference node |
+   | `isaac` | CycloneDDS `<ns>/teleop/retarget_frame`, no ROS 2 publisher | `hit-igris-c-integration` `sim_robot` |
+
+   With `isaac`, `teleop` also pins CycloneDDS to `lo` (unless `$CYCLONEDDS_URI` or `--dds_interface`
+   is set), turns the local viewer off and uses the `h264_nvenc` encoder:
+   `pixi run teleop -- --dds_namespace igris_c_999 --target isaac`.
+
    The three identifiers must match the other side, or nothing arrives and no error is shown:
 
    | Option | Must match | Default |
@@ -205,7 +216,8 @@ pixi run producer -- --help                                                     
 ```
 
 `producer` runs the retargeting pipeline alone, without `vr-link-stream`: nothing is sent back to
-the headset, so teleop is a pass-through without vision feedback. Start `vr_system` with
+the headset, so teleop is a pass-through without vision feedback. It takes the same `--target`
+(default `robot`) and publishes the reference frame by the table above. Start `vr_system` with
 **NO CAMERA** checked in this mode. The convergence ramp and arm hold still run on the robot
 side; only their HUD indicators (and the robot state overlay) are missing, because those reach
 the headset through `vr-link-stream`.

@@ -13,8 +13,12 @@ Pipeline::
       -> ConvergeGate (LowState + robotstate + VRS1 teleop_state)   ramp from the robot's measured pose on Start /
                                                                     Resume / low-level entry; arms and neck by
                                                                     default, waist and legs live (--converge_joints)
-      -> RetargetFramePayloadBuilder -> RetargetFrameRosPublisher   /gmr/teleop/retarget_frame (String, domain 91)
+      -> RetargetFramePayloadBuilder                                the motion reference; --target picks one transport
+                                                                    (app/targets.py):
+           -> RetargetFrameRosPublisher (every target but isaac)    /gmr/teleop/retarget_frame (String, domain 91)
                                                                     -> igris_c_inference_node (ONNX WBC -> DDS lowcmd)
+           -> RetargetFrameDdsPublisher (--target isaac)            <ns>/teleop/retarget_frame (DDS Joy_: frame + active
+                                                                    state) -> hit-igris-c-integration sim_robot
       -> HandTargets -> HandCmdDdsPublisher                         <ns>/handcmd (DDS HandCmd, fingers bypass the policy)
       -> ThumbstickWalk -> CmdVelDdsPublisher (--no_walk_dds)       <ns>/cmd_vel (DDS TwistStamped: left stick -> vx/vy,
                                                                     right stick -> yaw rate, the robot's gamepad layout and
@@ -52,7 +56,8 @@ Thumbsticks (walk velocity, while Active): left forward/back -> vx, left left/ri
   rate while Active and one stop sample goes out when the headset pauses, the skeleton is lost or the
   producer exits (the robot's controller also zeroes it after 500 ms without a sample).
 
-DDS outputs are ON by default (``--no_dds`` for a ROS-only session, e.g. with ``--replay_vrs1``).
+DDS outputs are ON by default (``--no_dds`` for a ROS-only session, e.g. with ``--replay_vrs1``;
+not with ``--target isaac``, whose reference travels on DDS).
 They move the robot and change its control mode: ROBROS hardware approval and the verification
 plan in README.md apply before running against the robot. The controller relay on
 ``vr/controller`` is state for recorders only (no robot command); the contract and the
@@ -83,6 +88,7 @@ from ..dds import (
     DEFAULT_HAND_TOPIC,
     DEFAULT_LOWSTATE_TOPIC,
     DEFAULT_REF_TOPIC,
+    DEFAULT_RETARGET_TOPIC,
     DEFAULT_ROBOTSTATE_TOPIC,
     TOPIC_NAMINGS,
     CmdVelDdsPublisher,
@@ -91,6 +97,7 @@ from ..dds import (
     HandCmdDdsPublisher,
     LowStateSubscriber,
     RefStateDdsPublisher,
+    RetargetFrameDdsPublisher,
     RobotModeSubscriber,
 )
 from ..retarget.hands import FINGER_SOURCES, MOTOR_IDS, HandTargets
@@ -110,6 +117,7 @@ from ..uplink.controller import ConnectionSessions, ControllerEvents
 from ..uplink.source_timing import SourceTick, SourceTimeline
 from ..uplink.walk import DEFAULT_DEADZONE, DEFAULT_MAX_LINEAR, DEFAULT_MAX_YAW_RATE, WALK_STOP, ThumbstickWalk
 from ..uplink.vrs1_source import DEFAULT_POSE_PORT, Vrs1FileSource, build_human_data, open_live_device, skeleton_complete
+from .targets import DEFAULT_TARGET, TARGETS, reference_over_dds
 from .viewer import DEFAULT_VIEWER_FPS, ReferenceViewer
 
 logger = logging.getLogger("igris_c_teleop")
@@ -120,6 +128,14 @@ DEFAULT_ROBOT = "robros_igris_c_v2"
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m igris_c_teleop", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--target",
+        choices=TARGETS,
+        default=DEFAULT_TARGET,
+        help="What this session drives; it selects the motion-reference transport. isaac: CycloneDDS retarget frame "
+        "(--retarget_dds_topic), no ROS 2 publisher. Every other target: ROS 2 (--ros_topic), as the robot's "
+        "inference node reads it. `pixi run teleop` forwards its own --target.",
     )
     vr = parser.add_argument_group("VRS1 input")
     vr.add_argument("--pose_host", type=str, default="0.0.0.0", help="Interface the VRS1 listener binds to.")
@@ -153,14 +169,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "one source; none: no hand command.",
     )
 
-    ros = parser.add_argument_group("ROS 2 output (motion reference)")
+    ros = parser.add_argument_group("ROS 2 output (motion reference; every target but isaac)")
     ros.add_argument("--ros_domain_id", type=int, default=DEFAULT_ROS_DOMAIN_ID, help="Must match the inference command.yaml domain_id.")
     ros.add_argument("--ros_topic", type=str, default=DEFAULT_ROS_TOPIC)
     ros.add_argument("--ros_active_topic", type=str, default=DEFAULT_ACTIVE_TOPIC)
     ros.add_argument("--ros_node_name", type=str, default=DEFAULT_NODE_NAME)
 
-    dds = parser.add_argument_group("igris_c_sdk DDS output (hand command, control mode)")
-    dds.add_argument("--no_dds", action="store_true", help="Publish the ROS frame only; no HandCmd, no control-mode requests.")
+    dds = parser.add_argument_group("igris_c_sdk DDS output (hand command, control mode; motion reference on --target isaac)")
+    dds.add_argument(
+        "--no_dds", action="store_true",
+        help="Publish the ROS frame only; no HandCmd, no control-mode requests. Not available with --target isaac.",
+    )
     dds.add_argument("--dds_domain_id", type=int, default=0)
     dds.add_argument(
         "--dds_namespace",
@@ -168,10 +187,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Robot-unit namespace (igris_c configs/robot/*.yaml). Required unless --no_dds: a wrong value fails silently.",
     )
+    dds.add_argument(
+        "--dds_interface",
+        type=str,
+        default=None,
+        help="Pin CycloneDDS to one network interface (e.g. 'lo' for same-PC simulator loopback); unset honours $CYCLONEDDS_URI / defaults.",
+    )
     dds.add_argument("--dds_topic_naming", choices=TOPIC_NAMINGS, default="native", help="Must match the robot's igris_c.network.dds_topic_naming.")
     dds.add_argument("--hand_dds_topic", type=str, default=DEFAULT_HAND_TOPIC, help="Bare HandCmd topic (resolved under the namespace).")
     dds.add_argument("--control_mode_timeout_ms", type=int, default=3000, help="Service timeout per control-mode request.")
     dds.add_argument("--no_mode_events", action="store_true", help="Ignore controller buttons (no control-mode requests).")
+    dds.add_argument(
+        "--retarget_dds_topic",
+        type=str,
+        default=DEFAULT_RETARGET_TOPIC,
+        metavar="TOPIC",
+        help=f"--target isaac: bare Joy_ topic carrying the whole-body retarget frame and active state "
+        f"(default {DEFAULT_RETARGET_TOPIC}). Unused on every other target.",
+    )
     dds.add_argument(
         "--ref_dds_topic",
         type=str,
@@ -265,25 +298,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _build_reference_payload(
+def _build_reference_frame(
     builder: RetargetFramePayloadBuilder,
     qpos: np.ndarray,
     now: float,
     status: ConvergeStatus,
     tick: SourceTick | None = None,
     session_id: str | None = None,
-) -> str:
+) -> dict:
     # A ramp starts at measured joints, potentially jumping from the previous
     # reference. Do not differentiate across that replacement. Reset only on
     # the start edge so velocity feedback resumes while the ramp continues.
     if status.trigger is not None:
         builder.reset()
     if tick is None or tick.source_ns is None:
-        return to_ros_payload(builder.build(qpos, now))
+        return builder.build(qpos, now)
     # One source_session_id per continuous headset clock: the consumer restarts its history when it changes.
-    return to_ros_payload(
-        builder.build(qpos, now, source_timestamp_ns=tick.source_ns, source_session_id=f"{session_id}:{tick.segment}")
-    )
+    return builder.build(qpos, now, source_timestamp_ns=tick.source_ns, source_session_id=f"{session_id}:{tick.segment}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -291,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.target_fps <= 0.0:
         raise SystemExit("--target_fps must be positive.")
+    # One reference transport per session, fixed by the target: CycloneDDS for isaac, ROS 2 otherwise.
+    dds_reference = reference_over_dds(args.target)
+    if dds_reference and args.no_dds:
+        raise SystemExit(f"--target {args.target} publishes the motion reference over CycloneDDS: it cannot run with --no_dds.")
+    if dds_reference and not args.retarget_dds_topic:
+        raise SystemExit("--retarget_dds_topic must not be empty.")
     if not args.no_dds and not args.dds_namespace:
         raise SystemExit("--dds_namespace is required (robot-unit namespace); pass --no_dds for a ROS-only session.")
     if not args.no_dds and args.finger_source == "none":
@@ -390,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
     control: ControlModeClient | None = None
     hand_dds: HandCmdDdsPublisher | None = None
     walk_dds: CmdVelDdsPublisher | None = None
+    retarget_dds: RetargetFrameDdsPublisher | None = None
     ref_dds: RefStateDdsPublisher | None = None
     controller_dds: ControllerStatePublisher | None = None
     feedback_dds: MotionFeedbackPublisher | None = None
@@ -417,9 +455,15 @@ def main(argv: list[str] | None = None) -> int:
                     args.viewer_fps,
                 )
         if not args.no_dds:
-            channel = DdsChannel.create(
-                domain_id=args.dds_domain_id, namespace=args.dds_namespace, topic_naming=args.dds_topic_naming
-            )
+            try:
+                channel = DdsChannel.create(
+                    domain_id=args.dds_domain_id,
+                    namespace=args.dds_namespace,
+                    topic_naming=args.dds_topic_naming,
+                    interface=args.dds_interface or "",
+                )
+            except ValueError as exc:
+                raise SystemExit(f"--dds_*: {exc}") from exc
             if events.enabled:
                 control = ControlModeClient(channel, timeout_ms=args.control_mode_timeout_ms)
             hand_dds = HandCmdDdsPublisher(channel, args.hand_dds_topic)
@@ -447,6 +491,14 @@ def main(argv: list[str] | None = None) -> int:
                     walk.max_linear,
                     walk.max_yaw_rate,
                     walk.deadzone,
+                )
+            if dds_reference:
+                retarget_dds = RetargetFrameDdsPublisher(channel, args.retarget_dds_topic)
+                retarget_dds.publish_active(False, stamp=time.time())
+                logger.info(
+                    "RetargetFrame DDS (whole-body reference + active, Joy_ type) on %s at %.0f Hz",
+                    retarget_dds.resolved_topic,
+                    args.target_fps,
                 )
             if args.ref_dds_topic:
                 ref_dds = RefStateDdsPublisher(channel, args.ref_dds_topic)
@@ -480,12 +532,15 @@ def main(argv: list[str] | None = None) -> int:
                 "the motion feedback and the convergence ramp (needs LowState) are off."
             )
 
-        ros = RetargetFrameRosPublisher(
-            domain_id=args.ros_domain_id, topic=args.ros_topic, active_topic=args.ros_active_topic, node_name=args.ros_node_name
-        )
-        logger.info("ROS 2 publisher %s on %s (domain %d, RELIABLE depth 1)", args.ros_node_name, args.ros_topic, args.ros_domain_id)
-        ros.publish_active(False)
-        logger.info("VR active state on %s (Bool, initial false, TRANSIENT_LOCAL depth 1)", args.ros_active_topic)
+        if not dds_reference:
+            ros = RetargetFrameRosPublisher(
+                domain_id=args.ros_domain_id, topic=args.ros_topic, active_topic=args.ros_active_topic, node_name=args.ros_node_name
+            )
+            logger.info("ROS 2 publisher %s on %s (domain %d, RELIABLE depth 1)", args.ros_node_name, args.ros_topic, args.ros_domain_id)
+            ros.publish_active(False)
+            logger.info("VR active state on %s (Bool, initial false, TRANSIENT_LOCAL depth 1)", args.ros_active_topic)
+        else:
+            logger.info("ROS 2 publisher not opened (--target %s): the motion reference goes out on CycloneDDS only.", args.target)
 
         if args.replay_vrs1 is not None:
             device = Vrs1FileSource(args.replay_vrs1)
@@ -532,12 +587,24 @@ def main(argv: list[str] | None = None) -> int:
 
             active = connected and state.teleop_state == TeleopState.ACTIVE
             if active != last_active:
-                try:
-                    ros.publish_active(active)
+                # The edge is delivered once every open transport took it. A failed publish leaves
+                # last_active unchanged, so the same edge is published again on the next tick.
+                delivered = True
+                if retarget_dds is not None:
+                    try:
+                        retarget_dds.publish_active(active, stamp=time.time())
+                    except Exception as exc:
+                        delivered = False
+                        logger.warning("DDS active state publish failed: %s", exc)
+                if ros is not None:
+                    try:
+                        ros.publish_active(active)
+                    except Exception as exc:
+                        delivered = False
+                        logger.warning("ROS active state publish failed: %s", exc)
+                if delivered:
                     last_active = active
                     logger.info("VR active state %s", active)
-                except Exception as exc:
-                    logger.warning("ROS active state publish failed: %s", exc)
 
             for event in events.update(connected, state):
                 if control is not None:
@@ -682,12 +749,29 @@ def main(argv: list[str] | None = None) -> int:
                         last_dds_error_log = now
 
             if fresh and status.publish:
+                # One frame per new headset record, built once for both transports. A build failure is
+                # logged and skipped like a publish failure, so the session keeps running.
+                frame: dict | None = None
                 try:
-                    ros.publish(_build_reference_payload(builder, qpos, now, status, tick, frame_session_id))
+                    frame = _build_reference_frame(builder, qpos, now, status, tick, frame_session_id)
                 except Exception as exc:
                     if now - last_ros_error_log > 2.0:
-                        logger.warning("ROS frame publish failed: %s", exc)
+                        logger.warning("Reference frame build failed: %s", exc)
                         last_ros_error_log = now
+                if frame is not None and retarget_dds is not None:
+                    try:
+                        retarget_dds.publish(frame, active=active, stamp=now)
+                    except Exception as exc:
+                        if now - last_dds_error_log > 2.0:
+                            logger.warning("RetargetFrame DDS publish failed: %s", exc)
+                            last_dds_error_log = now
+                if frame is not None and ros is not None:
+                    try:
+                        ros.publish(to_ros_payload(frame))
+                    except Exception as exc:
+                        if now - last_ros_error_log > 2.0:
+                            logger.warning("ROS frame publish failed: %s", exc)
+                            last_ros_error_log = now
 
             if fresh and viewer is not None:
                 # After every output of the tick. Decimated, never raises; turns itself off on a closed window.
@@ -713,6 +797,8 @@ def main(argv: list[str] | None = None) -> int:
                             f", cmd_vel vx={walk_command.vx:.2f} vy={walk_command.vy:.2f} yaw={walk_command.yaw_rate:.2f} "
                             f"written {walk_dds.published} (rejected {walk_dds.rejected})"
                         )
+                    if retarget_dds is not None:
+                        hands_text += f", RetargetDDS written {retarget_dds.published} (rejected {retarget_dds.rejected})"
                     if ref_dds is not None:
                         hands_text += f", RefState written {ref_dds.published} (rejected {ref_dds.rejected})"
                     if controller_dds is not None:
@@ -752,12 +838,14 @@ def main(argv: list[str] | None = None) -> int:
                             viewer_text = ", viewer off"
                     logger.info(
                         # solve = headset records retargeted (the headset's record rate); loop = poll / DDS rate.
-                        "solve %.1f Hz (loop %.1f Hz), IK %.1f ms avg, ROS frames %d (subscribers %d), neck %s%s%s%s%s",
+                        "solve %.1f Hz (loop %.1f Hz), IK %.1f ms avg, ROS frames %d (subscribers %d), DDS retarget %d, "
+                        "neck %s%s%s%s%s",
                         window_count / elapsed,
                         window_ticks / elapsed,
                         1e3 * window_ik_seconds / max(1, window_count),
-                        ros.published,
-                        ros.subscription_count(),
+                        0 if ros is None else ros.published,
+                        0 if ros is None else ros.subscription_count(),
+                        0 if retarget_dds is None else retarget_dds.published,
                         neck_text,
                         hands_text,
                         control_text,
@@ -786,6 +874,12 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     logger.warning("cmd_vel stop publish failed: %s", exc)
             walk_dds.close()
+        if retarget_dds is not None:
+            try:
+                retarget_dds.publish_active(False, stamp=time.time())
+            except Exception as exc:
+                logger.warning("DDS active state shutdown publish failed: %s", exc)
+            retarget_dds.close()
         if ref_dds is not None:
             ref_dds.close()
         if controller_dds is not None:

@@ -55,6 +55,7 @@ class _RecordingRos:
         del kwargs
         self.frames: list[dict] = []
         self.payloads: list[str] = []
+        self.active_calls: list[bool] = []
         self.published = 0
 
     def publish(self, payload: str) -> None:
@@ -63,7 +64,7 @@ class _RecordingRos:
         self.published += 1
 
     def publish_active(self, active: bool) -> None:
-        del active
+        self.active_calls.append(active)
 
     def subscription_count(self) -> int:
         return 0
@@ -101,19 +102,19 @@ def _record(stamp_ns: int) -> VRInputState:
     return dataclasses.replace(make_state(), source_timestamp_ns=stamp_ns)
 
 
-def _run(monkeypatch, model, keyframe_qpos, states, extra_args=()):
+def _run(monkeypatch, model, keyframe_qpos, states, extra_args=(), ros=None, base_args=ARGS):
     import general_motion_retargeting
     import loop_rate_limiters
 
     gmr = _SteppingGmr(model, keyframe_qpos)
-    ros = _RecordingRos()
+    ros = _RecordingRos() if ros is None else ros
     monkeypatch.setattr(general_motion_retargeting, "GeneralMotionRetargeting", lambda **kwargs: gmr)
     monkeypatch.setattr(loop_rate_limiters, "RateLimiter", _NoSleep)
     monkeypatch.setattr(producer, "RetargetFrameRosPublisher", lambda **kwargs: ros)
     monkeypatch.setattr(producer, "Vrs1FileSource", lambda path: _ScriptedDevice(states))
     handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        assert producer.main([*ARGS, *extra_args]) == 0
+        assert producer.main([*base_args, *extra_args]) == 0
     finally:
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
@@ -192,3 +193,129 @@ def test_sender_without_timestamps_keeps_the_per_tick_behaviour(monkeypatch, mod
 def test_source_timing_flag_default():
     assert not producer.parse_args([]).no_source_timing
     assert producer.parse_args(["--no_source_timing"]).no_source_timing
+
+
+class _FlakyActiveRos(_RecordingRos):
+    """Fails the first publish of the rising Active edge, then works."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fail_rising = True
+
+    def publish_active(self, active: bool) -> None:
+        super().publish_active(active)
+        if active and self._fail_rising:
+            self._fail_rising = False
+            raise RuntimeError("publish failed")
+
+
+def test_active_edge_is_published_again_after_a_failed_publish(monkeypatch, model, keyframe_qpos):
+    from vr_link.types import TeleopState
+
+    ros = _FlakyActiveRos()
+    states = [dataclasses.replace(_record((1000 + 20 * index) * MS), teleop_state=TeleopState.ACTIVE) for index in range(4)]
+    _run(monkeypatch, model, keyframe_qpos, states, ros=ros)
+
+    # Startup False, the rising edge that failed, its retry on the next tick, then no repeat while Active holds.
+    assert ros.active_calls[:3] == [False, True, True]
+    assert ros.active_calls.count(True) == 2
+    assert len(ros.frames) == 4  # the reference frames kept flowing meanwhile
+
+
+# --- reference transport by target (app/targets.py): DDS on, with stand-ins for the SDK objects ---------------
+
+DDS_ARGS = [arg for arg in ARGS if arg != "--no_dds"] + [
+    "--dds_namespace", "igris_c_test", "--no_mode_events", "--no_walk_dds", "--no_controller_dds",
+    "--no_motion_feedback_dds", "--no_converge", "--ref_dds_topic", "",
+]
+
+
+class _FakeDdsChannel:
+    sdk = None
+
+    @classmethod
+    def create(cls, **kwargs) -> "_FakeDdsChannel":
+        del kwargs
+        return cls()
+
+    def resolve(self, topic: str) -> str:
+        return f"igris_c_test/{topic}"
+
+    def release(self) -> None:
+        pass
+
+
+class _RecordingHandDds:
+    def __init__(self, channel, topic: str) -> None:
+        self.resolved_topic = channel.resolve(topic)
+        self.published = 0
+        self.rejected = 0
+
+    def publish(self, values) -> None:
+        del values
+        self.published += 1
+
+    def close(self) -> None:
+        pass
+
+
+def _run_with_dds(monkeypatch, model, keyframe_qpos, states, target):
+    """Returns (ROS stand-in, DDS retarget publishers the producer constructed)."""
+
+    constructed = []
+
+    class _RecordingRetargetDds:
+        def __init__(self, channel, topic: str) -> None:
+            self.topic = topic
+            self.resolved_topic = channel.resolve(topic)
+            self.frames: list[dict] = []
+            self.active_calls: list[bool] = []
+            self.published = 0
+            self.rejected = 0
+            constructed.append(self)
+
+        def publish(self, frame, *, active: bool, stamp: float) -> None:
+            del active, stamp
+            self.frames.append(frame)
+            self.published += 1
+
+        def publish_active(self, active: bool, *, stamp: float) -> None:
+            del stamp
+            self.active_calls.append(active)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(producer, "DdsChannel", _FakeDdsChannel)
+    monkeypatch.setattr(producer, "HandCmdDdsPublisher", _RecordingHandDds)
+    monkeypatch.setattr(producer, "RetargetFrameDdsPublisher", _RecordingRetargetDds)
+    _, ros = _run(monkeypatch, model, keyframe_qpos, states, ["--target", target], base_args=DDS_ARGS)
+    return ros, constructed
+
+
+def _active_records(stamps):
+    from vr_link.types import TeleopState
+
+    return [dataclasses.replace(_record(stamp), teleop_state=TeleopState.ACTIVE) for stamp in stamps]
+
+
+def test_isaac_publishes_the_reference_on_dds_only(monkeypatch, model, keyframe_qpos):
+    stamps = [1000 * MS, 1020 * MS, 1040 * MS]
+    ros, constructed = _run_with_dds(monkeypatch, model, keyframe_qpos, _active_records(stamps), "isaac")
+
+    assert ros.frames == [] and ros.active_calls == []  # the ROS 2 publisher was never opened
+    (retarget,) = constructed
+    assert retarget.topic == "teleop/retarget_frame"
+    # The same contract frames as the ROS path, one per headset record with its source timing.
+    assert [frame["record_meta"]["source_timestamp_ns"] for frame in retarget.frames] == stamps
+    assert retarget.active_calls[:2] == [False, True] and retarget.active_calls[-1] is False
+
+
+@pytest.mark.parametrize("target", ["robot", "usb", "mujoco", "shm"])
+def test_every_other_target_publishes_the_reference_on_ros_only(monkeypatch, model, keyframe_qpos, target):
+    stamps = [1000 * MS, 1020 * MS, 1040 * MS]
+    ros, constructed = _run_with_dds(monkeypatch, model, keyframe_qpos, _active_records(stamps), target)
+
+    assert constructed == []  # no DDS retarget publisher: nothing new on the robot's DDS network
+    assert _meta(ros, "source_timestamp_ns") == stamps
+    assert ros.active_calls[:2] == [False, True] and ros.active_calls[-1] is False

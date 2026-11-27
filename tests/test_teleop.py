@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from igris_c_teleop.app import teleop
+from igris_c_teleop.app import targets, teleop
 
 NS = ["--dds_namespace", "igris_c_test"]
 
 
-def _commands(*argv: str):
+def _commands(*argv: str, environ: dict[str, str] | None = None):
     args, rest = teleop.parse_args(list(argv))
-    return teleop.build_commands(args, rest)
+    return teleop.build_commands(args, rest, environ={} if environ is None else environ)
 
 
 def test_default_target_is_robot_dds_with_packaged_config():
@@ -29,7 +29,7 @@ def test_default_target_is_robot_dds_with_packaged_config():
     assert stream.argv[stream.argv.index("--dds-domain") + 1] == "0"
     assert producer.argv[:3] == [sys.executable, "-m", "igris_c_teleop"]
     assert producer.argv[3:] == [
-        "--dds_namespace", "igris_c_test", "--dds_domain_id", "0", "--dds_topic_naming", "native",
+        "--target", "robot", "--dds_namespace", "igris_c_test", "--dds_domain_id", "0", "--dds_topic_naming", "native",
     ]
 
 
@@ -75,6 +75,61 @@ def test_head_rgb_is_forwarded_to_the_sender():
 def test_no_stream_gives_producer_only():
     (producer,) = _commands(*NS, "--no_stream")
     assert producer.name == "producer"
+
+
+def test_targets_are_shared_with_the_producer_and_only_isaac_takes_the_reference_on_dds():
+    assert tuple(teleop.STREAM_TARGETS) == targets.TARGETS
+    assert teleop.DEFAULT_TARGET == targets.DEFAULT_TARGET == "robot"
+    assert [target for target in targets.TARGETS if targets.reference_over_dds(target)] == ["isaac"]
+    with pytest.raises(ValueError, match="unknown target"):
+        targets.reference_over_dds("gazebo")
+
+
+@pytest.mark.parametrize("target", targets.TARGETS)
+def test_target_is_forwarded_to_the_producer_once(target):
+    _, producer = _commands(*NS, "--target", target)
+    assert producer.argv.count("--target") == 1
+    assert producer.argv[producer.argv.index("--target") + 1] == target
+
+
+def test_isaac_defaults_to_loopback_no_viewer_and_nvenc():
+    stream, producer = _commands(*NS, "--target", "isaac")
+    assert stream.argv[stream.argv.index("--encoder") + 1] == "h264_nvenc"
+    assert '<NetworkInterface name="lo"' in stream.env["CYCLONEDDS_URI"]
+    assert producer.env == stream.env
+    assert producer.argv[producer.argv.index("--dds_interface") + 1] == "lo"
+    assert "--no_viewer" in producer.argv
+
+    # Existing $CYCLONEDDS_URI is respected unless --dds_interface overrides it; --viewer/--stream_encoder override defaults.
+    stream_env, prod_env = _commands(
+        *NS, "--target", "isaac", "--viewer", "on", "--stream_encoder", "sw",
+        environ={"CYCLONEDDS_URI": "file:///tmp/cdds.xml"},
+    )
+    assert stream_env.env == {} and prod_env.env == {}
+    assert "--dds_interface" not in prod_env.argv and "--no_viewer" not in prod_env.argv
+    assert stream_env.argv[stream_env.argv.index("--encoder") + 1] == "sw"
+
+
+@pytest.mark.parametrize("target", ["robot", "usb", "mujoco", "shm"])
+def test_other_targets_get_no_simulator_defaults(target):
+    stream, producer = _commands(*NS, "--target", target)
+    assert stream.env == {} and producer.env == {}  # CycloneDDS interface left to $CYCLONEDDS_URI / its own choice
+    assert "--encoder" not in stream.argv
+    assert producer.argv[3:] == [
+        "--target", target, "--dds_namespace", "igris_c_test", "--dds_domain_id", "0", "--dds_topic_naming", "native",
+    ]
+
+    # Explicit options still apply on any target.
+    stream_hw, prod_hw = _commands(*NS, "--target", target, "--dds_interface", "enp3s0", "--viewer", "off")
+    assert '<NetworkInterface name="enp3s0"' in stream_hw.env["CYCLONEDDS_URI"]
+    assert prod_hw.argv[prod_hw.argv.index("--dds_interface") + 1] == "enp3s0"
+    assert "--no_viewer" in prod_hw.argv
+
+
+def test_launcher_has_no_switch_for_the_reference_transport():
+    # The transport follows --target only; a leftover --ros would reach the producer, which rejects it.
+    args, rest = teleop.parse_args([*NS, "--ros", "on"])
+    assert not hasattr(args, "ros") and rest == ["--ros", "on"]
 
 
 def test_non_native_naming_requires_explicit_stream_config(tmp_path):

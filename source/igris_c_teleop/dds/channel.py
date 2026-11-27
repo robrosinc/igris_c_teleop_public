@@ -29,6 +29,23 @@ NO_DDS_HINT = (
 )
 
 
+def cyclonedds_xml(interface: str) -> str:
+    """Inline CycloneDDS XML pinning traffic to ``interface`` (adds ``DontRoute`` on loopback)."""
+
+    iface = interface.strip()
+    if not iface:
+        return ""
+    if any(ch in iface for ch in ('"', "<", ">", "&")) or any(ch.isspace() for ch in iface):
+        raise ValueError(f"invalid CycloneDDS interface name {interface!r}")
+    dont_route = "<DontRoute>true</DontRoute>" if iface == "lo" else ""
+    return (
+        "<CycloneDDS><Domain><General>"
+        f'<Interfaces><NetworkInterface name="{iface}" autodetermine="false"/></Interfaces>'
+        f"{dont_route}"
+        "</General></Domain></CycloneDDS>"
+    )
+
+
 def import_sdk():
     try:
         import igris_c_sdk as sdk
@@ -65,22 +82,35 @@ class DdsChannel:
         self._released = False
 
     @classmethod
-    def create(cls, *, domain_id: int, namespace: str, topic_naming: str = "native", sdk=None) -> "DdsChannel":
+    def create(
+        cls,
+        *,
+        domain_id: int,
+        namespace: str,
+        topic_naming: str = "native",
+        interface: str = "",
+        config_uri: str = "",
+        sdk=None,
+    ) -> "DdsChannel":
         if topic_naming not in TOPIC_NAMINGS:
             raise ValueError(f"topic_naming must be one of {TOPIC_NAMINGS}, got {topic_naming!r}.")
         if not namespace:
             raise ValueError("DDS namespace must not be empty: a wrong namespace fails silently on the wire.")
+        effective_config = str(config_uri or (cyclonedds_xml(interface) if interface else ""))
         if sdk is None:
             sdk = import_sdk()
         channel = sdk.ChannelFactory.Instance()
         parse_naming = getattr(sdk, "parse_topic_naming", None)
         if parse_naming is not None:
-            channel.Init(int(domain_id), str(namespace), "", parse_naming(topic_naming))
+            channel.Init(int(domain_id), str(namespace), effective_config, parse_naming(topic_naming))
         else:
             # Older binding: Init(domain_id, ns[, config]); only native naming exists there.
             if topic_naming != "native":
                 raise SystemExit("This igris_c_sdk binding predates topic naming; only 'native' is available.")
-            channel.Init(int(domain_id), str(namespace))
+            if effective_config:
+                channel.Init(int(domain_id), str(namespace), effective_config)
+            else:
+                channel.Init(int(domain_id), str(namespace))
         if hasattr(channel, "IsInitialized") and not channel.IsInitialized():
             raise SystemExit(f"igris_c_sdk ChannelFactory failed to initialize (domain {domain_id}, namespace {namespace!r}).")
         # The wire contract (type names, service topic prefix) is whatever the installed wheel was
@@ -116,4 +146,4 @@ class DdsChannel:
             logger.warning("igris_c_sdk ChannelFactory release failed: %s", exc)
 
 
-__all__ = ["BODY_JOINT_COUNT", "NO_DDS_HINT", "TOPIC_NAMINGS", "DdsChannel", "import_sdk", "sdk_type"]
+__all__ = ["BODY_JOINT_COUNT", "NO_DDS_HINT", "TOPIC_NAMINGS", "DdsChannel", "cyclonedds_xml", "import_sdk", "sdk_type"]

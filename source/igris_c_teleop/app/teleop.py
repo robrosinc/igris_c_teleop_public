@@ -8,9 +8,11 @@ Starts two child processes of this pixi env with one DDS namespace/domain for bo
      calibration), usb -> ``stream_usb.yaml`` (stereo camera on this PC), mujoco ->
      ``stream_dds_mujoco.yaml``, isaac -> ``stream_dds_isaac.yaml``, shm ->
      ``stream_shm.yaml`` (simulator shared-memory segment).
-  2. the producer (``igris_c_teleop.app.producer``): VRS1 uplink (port 9102) -> GMR -> ROS 2
-     frame + HandCmd / control-mode DDS. Every argument this launcher does not know is
-     passed to it unchanged (``--measure_fps``, ``--finger_source``, ...).
+  2. the producer (``igris_c_teleop.app.producer``): VRS1 uplink (port 9102) -> GMR -> motion
+     reference + HandCmd / control-mode DDS. ``--target`` is forwarded to it and selects the
+     reference transport (app/targets.py): CycloneDDS for isaac, ROS 2 for every other target.
+     Every argument this launcher does not know is passed to it unchanged (``--measure_fps``,
+     ``--finger_source``, ...).
 
 Separate processes on purpose: the video encoder cannot stall the 100 Hz retargeting
 loop and a crash on one side cannot take the other down silently. The launcher
@@ -31,16 +33,17 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
-from ..dds import TOPIC_NAMINGS
+from ..dds import TOPIC_NAMINGS, cyclonedds_xml
+from .targets import DEFAULT_TARGET, TARGETS
 
 logger = logging.getLogger("igris_c_teleop.teleop")
 
-# target -> (vr-link-stream --source, packaged vr_link config file)
+# target -> (vr-link-stream --source, packaged vr_link config file); one entry per app/targets.py TARGETS
 STREAM_TARGETS: dict[str, tuple[str, str]] = {
     "robot": ("dds", "stream_dds.yaml"),
     "usb": ("usb", "stream_usb.yaml"),  # real robot, stereo camera on this PC's USB
@@ -48,7 +51,10 @@ STREAM_TARGETS: dict[str, tuple[str, str]] = {
     "isaac": ("dds", "stream_dds_isaac.yaml"),
     "shm": ("shm", "stream_shm.yaml"),
 }
-DEFAULT_TARGET = "robot"
+# Same-PC simulator defaults (loopback DDS interface, no local viewer, NVENC encoder) apply to these
+# targets only; every other target runs exactly as without them.
+SIM_DEFAULTS_TARGETS = ("isaac",)
+SIM_DEFAULT_ENCODER = "h264_nvenc"
 DEFAULT_GRACE_SEC = 5.0
 _POLL_SEC = 0.2
 
@@ -57,6 +63,7 @@ _POLL_SEC = 0.2
 class ChildCommand:
     name: str
     argv: list[str]
+    env: dict[str, str] = field(default_factory=dict)
 
 
 def packaged_stream_config(filename: str) -> Path:
@@ -78,6 +85,12 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     )
     dds.add_argument("--dds_domain_id", type=int, default=0)
     dds.add_argument(
+        "--dds_interface",
+        type=str,
+        default=None,
+        help="Pin CycloneDDS to one network interface for both processes (defaults to 'lo' on --target isaac when $CYCLONEDDS_URI is unset).",
+    )
+    dds.add_argument(
         "--dds_topic_naming",
         choices=TOPIC_NAMINGS,
         default="native",
@@ -87,7 +100,11 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
 
     stream = parser.add_argument_group("vr-link-stream (VRL2 downlink)")
     stream.add_argument(
-        "--target", choices=tuple(STREAM_TARGETS), default=DEFAULT_TARGET, help="Which frame source feeds the headset."
+        "--target",
+        choices=TARGETS,
+        default=DEFAULT_TARGET,
+        help="What the session drives: picks the frame source that feeds the headset and, forwarded to the "
+        "producer, the motion-reference transport (CycloneDDS for isaac, ROS 2 for every other target).",
     )
     stream.add_argument(
         "--stream_config",
@@ -106,6 +123,12 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         "that demultiplexes stream_id.",
     )
     stream.add_argument("--no_stream", action="store_true", help="Producer only (same as pixi run producer).")
+    stream.add_argument(
+        "--viewer",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Producer MuJoCo viewer: 'auto' (default) disables the local viewer on --target isaac.",
+    )
 
     parser.add_argument(
         "--grace",
@@ -119,8 +142,23 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     return args, list(producer_args)
 
 
-def build_commands(args: argparse.Namespace, producer_args: Sequence[str]) -> list[ChildCommand]:
+def build_commands(
+    args: argparse.Namespace,
+    producer_args: Sequence[str],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> list[ChildCommand]:
     """The child command lines, stream first. Pure (no process is started)."""
+
+    env_map = os.environ if environ is None else environ
+    sim_defaults = args.target in SIM_DEFAULTS_TARGETS
+    interface = args.dds_interface
+    if interface is None and sim_defaults and not env_map.get("CYCLONEDDS_URI"):
+        interface = "lo"
+    try:
+        child_env = {"CYCLONEDDS_URI": cyclonedds_xml(interface)} if interface else {}
+    except ValueError as exc:
+        raise SystemExit(f"--dds_interface: {exc}") from exc
 
     python = sys.executable
     commands: list[ChildCommand] = []
@@ -142,22 +180,30 @@ def build_commands(args: argparse.Namespace, producer_args: Sequence[str]) -> li
             "--dds-namespace", args.dds_namespace,
             "--dds-domain", str(args.dds_domain_id),
         ]
-        if args.stream_encoder:
-            stream_argv += ["--encoder", args.stream_encoder]
+        encoder = args.stream_encoder or (SIM_DEFAULT_ENCODER if sim_defaults else None)
+        if encoder:
+            stream_argv += ["--encoder", encoder]
         if args.stream_max_fps:
             stream_argv += ["--max-fps", str(args.stream_max_fps)]
         if args.head_rgb:
             stream_argv += ["--head-rgb", args.head_rgb]
-        commands.append(ChildCommand("vr-link-stream", stream_argv))
+        commands.append(ChildCommand("vr-link-stream", stream_argv, dict(child_env)))
 
+    # The producer derives the motion-reference transport from the same target (app/targets.py).
     producer_argv = [
         python, "-m", "igris_c_teleop",
+        "--target", args.target,
         "--dds_namespace", args.dds_namespace,
         "--dds_domain_id", str(args.dds_domain_id),
         "--dds_topic_naming", args.dds_topic_naming,
-        *producer_args,
     ]
-    commands.append(ChildCommand("producer", producer_argv))
+    if interface and "--dds_interface" not in producer_args:
+        producer_argv += ["--dds_interface", interface]
+    disable_viewer = args.viewer == "off" or (args.viewer == "auto" and sim_defaults)
+    if disable_viewer and "--no_viewer" not in producer_args:
+        producer_argv.append("--no_viewer")
+    producer_argv.extend(producer_args)
+    commands.append(ChildCommand("producer", producer_argv, dict(child_env)))
     return commands
 
 
@@ -204,7 +250,8 @@ def run_supervised(commands: Sequence[ChildCommand], *, grace: float = DEFAULT_G
     try:
         for command in commands:
             logger.info("starting %s: %s", command.name, " ".join(command.argv))
-            children[command.name] = subprocess.Popen(command.argv, env=os.environ.copy())
+            child_env = {**os.environ, **command.env}
+            children[command.name] = subprocess.Popen(command.argv, env=child_env)
         while True:
             exited = [(name, proc.returncode) for name, proc in children.items() if proc.poll() is not None]
             if exited:
